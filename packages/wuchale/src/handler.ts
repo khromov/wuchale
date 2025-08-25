@@ -68,19 +68,14 @@ async function saveCatalogToPO(catalog: Catalog, filename: string, headers = {})
     const po = new PO()
     po.headers = headers
     
-    // Sort catalog items for consistent ordering
     const sortedItems = Object.values(catalog).sort((a, b) => {
-        // Primary sort: msgid (alphabetically)
         if (a.msgid !== b.msgid) {
             return a.msgid.localeCompare(b.msgid)
         }
-        // Secondary sort: msgctxt (context) - null values sorted first
         const aContext = a.msgctxt || ''
         const bContext = b.msgctxt || ''
         return aContext.localeCompare(bContext)
     })
-    
-    // Sort file references within each item for consistent ordering
     for (const item of sortedItems) {
         item.references = [...item.references].sort()
         po.items.push(item)
@@ -635,7 +630,6 @@ export class AdapterHandler {
                 } else {
                     newRefs = true // now it references it
                 }
-                // Insert filename in sorted order to maintain consistency
                 if (!poItem.references.includes(filename)) {
                     poItem.references.push(filename)
                     poItem.references.sort()
