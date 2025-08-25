@@ -74,13 +74,13 @@ async function saveCatalogToPO(catalog: Catalog, filename: string, headers = {})
         const msgidCompare = a.msgid.localeCompare(b.msgid)
         if (msgidCompare !== 0) return msgidCompare
         
-        // If msgid is the same, sort by msgctxt (context)
+        // Then by msgctxt (context)
         const aContext = a.msgctxt || ''
         const bContext = b.msgctxt || ''
         const contextCompare = aContext.localeCompare(bContext)
         if (contextCompare !== 0) return contextCompare
         
-        // If both msgid and context are the same, sort by msgid_plural
+        // Finally by msgid_plural
         const aPlural = a.msgid_plural || ''
         const bPlural = b.msgid_plural || ''
         return aPlural.localeCompare(bPlural)
@@ -88,7 +88,6 @@ async function saveCatalogToPO(catalog: Catalog, filename: string, headers = {})
     
     // Sort references within each item and add to po
     for (const item of sortedItems) {
-        // Sort the references array alphabetically
         if (item.references && item.references.length > 0) {
             item.references.sort((a, b) => a.localeCompare(b))
         }
@@ -121,7 +120,6 @@ type SharedState = {
     indexTracker: IndexTracker
 }
 
-/* shared states among multiple adapters handlers */
 export type SharedStates = Record<string, SharedState>
 
 type GranularState = {
@@ -148,7 +146,6 @@ export class AdapterHandler {
 
     #adapter: Adapter
 
-    /* Shared state with other adapter handlers */
     sharedState: SharedState
 
     granularStateByFile: Record<string, GranularState> = {}
@@ -219,7 +216,6 @@ export class AdapterHandler {
         }
     }
 
-    /** Get both catalog virtual module names AND HMR event names */
     virtModEvent = (locale: string, loadID: string | null) => `${this.#virtualPrefix}catalog/${this.key}/${loadID ?? this.key}/${locale}`
 
     #getCompiledFilePath(loc: string, id: string | null) {
@@ -321,7 +317,6 @@ export class AdapterHandler {
                 loaded: false,
             }
             this.#catalogsFname[loc] = this.catalogFileName(loc)
-            // for handleHotUpdate
             this.catalogPathsToLocales[this.#catalogsFname[loc]] = loc
             if (loc !== this.#config.sourceLocale) {
                 this.#geminiQueue[loc] = new GeminiQueue(
@@ -461,7 +456,6 @@ export class AdapterHandler {
 
     globConfToArgs = (conf: GlobConf): [string[], { ignore: string[] }] => {
         let patterns: string[] = []
-        // ignore generated files
         const options = { ignore: [this.loaderPath] }
         if (this.#adapter.writeFiles.proxy) {
             options.ignore.push(this.proxyPath)
@@ -519,7 +513,7 @@ export class AdapterHandler {
             }
         }
         await saveCatalogToPO(poFile.catalog, this.#catalogsFname[loc], fullHead)
-        if (this.#mode !== 'extract') { // save for the end
+        if (this.#mode !== 'extract') {
             await this.compile(loc)
         }
     }
@@ -591,7 +585,6 @@ export class AdapterHandler {
         })
         const hmrKeys: Record<string, string[]> = {}
         for (const loc of this.#locales) {
-            // clear references to this file first
             let previousReferences: Record<string, number> = {}
             let fewerRefs = false
             const poFile = this.sharedState.poFilesByLoc[loc]
@@ -642,7 +635,7 @@ export class AdapterHandler {
                         previousReferences[key]--
                     }
                 } else {
-                    newRefs = true // now it references it
+                    newRefs = true
                 }
                 poItem.references.push(filename)
                 poItem.obsolete = false
@@ -657,7 +650,7 @@ export class AdapterHandler {
                 }
             }
             if (untranslated.length === 0) {
-                if (newRefs || Object.keys(previousReferences).length) { // or unused refs
+                if (newRefs || Object.keys(previousReferences).length) {
                     await this.savePoAndCompile(loc)
                 }
                 continue
