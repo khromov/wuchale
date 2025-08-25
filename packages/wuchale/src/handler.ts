@@ -67,9 +67,34 @@ async function loadCatalogFromPO(filename: string): Promise<POFile> {
 async function saveCatalogToPO(catalog: Catalog, filename: string, headers = {}): Promise<void> {
     const po = new PO()
     po.headers = headers
-    for (const item of Object.values(catalog)) {
+    
+    // Sort catalog items for consistent ordering
+    const sortedItems = Object.values(catalog).sort((a, b) => {
+        // First sort by msgid
+        const msgidCompare = a.msgid.localeCompare(b.msgid)
+        if (msgidCompare !== 0) return msgidCompare
+        
+        // If msgid is the same, sort by msgctxt (context)
+        const aContext = a.msgctxt || ''
+        const bContext = b.msgctxt || ''
+        const contextCompare = aContext.localeCompare(bContext)
+        if (contextCompare !== 0) return contextCompare
+        
+        // If both msgid and context are the same, sort by msgid_plural
+        const aPlural = a.msgid_plural || ''
+        const bPlural = b.msgid_plural || ''
+        return aPlural.localeCompare(bPlural)
+    })
+    
+    // Sort references within each item and add to po
+    for (const item of sortedItems) {
+        // Sort the references array alphabetically
+        if (item.references && item.references.length > 0) {
+            item.references.sort((a, b) => a.localeCompare(b))
+        }
         po.items.push(item)
     }
+    
     return new Promise((res, rej) => {
         po.save(filename, err => {
             if (err) {
