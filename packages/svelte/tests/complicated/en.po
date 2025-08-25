@@ -18,7 +18,6 @@ msgid "This page says: {0}"
 msgstr "This page says: {0}"
 
 #: app.svelte
-#: app.svelte
 msgid "Extracted text"
 msgstr "Extracted text"
 
@@ -42,7 +41,6 @@ msgstr "Check extracted"
 msgid "That"
 msgstr "That"
 
-#: app.svelte
 #: app.svelte
 msgid "And this"
 msgstr "And this"
