@@ -9,6 +9,7 @@ import { compileTranslation } from '../dist/compile.js'
 import { testContent, testDir, javascript, typescript } from './check.js'
 import { adapter } from 'wuchale/adapter-vanilla'
 import { statfs } from 'fs/promises'
+import './ordering-test.js'  // Import ordering tests
 
 test('Compile nested', function(t) {
     t.assert.deepEqual(compileTranslation('Foo <0>bar</0>', 'foo'), ['Foo ', [0, 'bar']])
