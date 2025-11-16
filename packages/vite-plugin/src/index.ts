@@ -1,11 +1,10 @@
 // $$ cd ../.. && npm run test
 import { relative, resolve } from "node:path"
+import { platform } from "node:process"
 import { getConfig as getConfig, Logger, AdapterHandler } from "wuchale"
 import type { Config, Mode, SharedStates } from "wuchale"
 
 const pluginName = 'wuchale'
-const virtualPrefix = `virtual:${pluginName}/`
-const virtualResolvedPrefix = '\0'
 
 type HotUpdateCtx = {
     file: string
@@ -19,24 +18,26 @@ type HotUpdateCtx = {
     timestamp: number
 }
 
-class Plugin {
+class Wuchale {
 
     name = pluginName
 
     #config: Config
-    #locales: string[] = []
     #projectRoot: string = ''
 
     #adapters: Record<string, AdapterHandler> = {}
     #adaptersByLoaderPath: Record<string, AdapterHandler> = {}
     #adaptersByCatalogPath: Record<string, AdapterHandler[]> = {}
+    #granularLoadAdapters: AdapterHandler[] = []
+    #singleCompiledCatalogs: Set<String> = new Set()
+    #locales: string[] = []
 
     #log: Logger
 
     #configPath: string
 
     #hmrVersion = -1
-    #hmrLastTime = 0
+    #lastSourceTriggeredPOWrite: number = 0
 
     constructor(configPath: string) {
         this.#configPath = configPath
@@ -44,8 +45,8 @@ class Plugin {
 
     #init = async (mode: Mode) => {
         this.#config = await getConfig(this.#configPath)
+        this.#log = new Logger(this.#config.logLevel)
         this.#locales = [this.#config.sourceLocale, ...this.#config.otherLocales]
-        this.#log = new Logger(this.#config.messages)
         if (Object.keys(this.#config.adapters).length === 0) {
             throw Error('At least one adapter is needed.')
         }
@@ -56,21 +57,41 @@ class Plugin {
                 key,
                 this.#config,
                 mode,
-                virtualPrefix,
                 this.#projectRoot,
                 this.#log,
             )
             await handler.init(sharedState)
-            this.#adapters[key] = handler
-            const loaderPath = resolve(handler.loaderPath)
-            if (loaderPath in this.#adaptersByLoaderPath) {
-                throw new Error([
-                    'While catalogs can be shared, the same loader cannot be used by multiple adapters',
-                    `Conflicting: ${key} and ${this.#adaptersByLoaderPath[loaderPath].key}`,
-                    'Specify a different loaderPath for one of them.'
-                ].join('\n'))
+            handler.onBeforeWritePO = () => {
+                this.#lastSourceTriggeredPOWrite = performance.now()
             }
-            this.#adaptersByLoaderPath[loaderPath] = handler
+            this.#adapters[key] = handler
+            if (adapter.granularLoad) {
+                this.#granularLoadAdapters.push(handler)
+            } else {
+                for (const locale of this.#locales) {
+                    this.#singleCompiledCatalogs.add(resolve(handler.getCompiledFilePath(locale, null)))
+                }
+            }
+            for (const path of Object.values(handler.loaderPath)) {
+                let loaderPath = resolve(path)
+                if (platform === 'win32') {
+                    // seems vite does this for the importer field in the resolveId hook
+                    loaderPath = loaderPath.replaceAll('\\', '/')
+                }
+                if (loaderPath in this.#adaptersByLoaderPath) {
+                    const otherKey = this.#adaptersByLoaderPath[loaderPath].key
+                    if (otherKey === key) {
+                        // same loader for both ssr and client, no problem
+                        continue
+                    }
+                    throw new Error([
+                        'While catalogs can be shared, the same loader cannot be used by multiple adapters',
+                        `Conflicting: ${key} and ${otherKey}`,
+                        'Specify a different loaderPath for one of them.'
+                    ].join('\n'))
+                }
+                this.#adaptersByLoaderPath[loaderPath] = handler
+            }
             for (const fname of Object.keys(handler.catalogPathsToLocales)) {
                 this.#adaptersByCatalogPath[fname] ??= []
                 this.#adaptersByCatalogPath[fname].push(handler)
@@ -83,7 +104,7 @@ class Plugin {
         if (config.env.DEV) {
             mode = 'dev'
         } else {
-            mode = 'prod'
+            mode = 'build'
         }
         this.#projectRoot = config.root
         await this.#init(mode)
@@ -91,11 +112,22 @@ class Plugin {
 
     handleHotUpdate = async (ctx: HotUpdateCtx) => {
         if (!(ctx.file in this.#adaptersByCatalogPath)) {
+            if (this.#singleCompiledCatalogs.has(ctx.file)) {
+                return []
+            }
+            for (const adapter of this.#granularLoadAdapters) {
+                for (const loc of this.#locales) {
+                    for (const id in adapter.granularStateByID) {
+                        if (resolve(adapter.getCompiledFilePath(loc, id)) === id) {
+                            return []
+                        }
+                    }
+                }
+            }
             this.#hmrVersion++
-            this.#hmrLastTime = performance.now()
             return
         }
-        const sourceTriggered = performance.now() - this.#hmrLastTime < 2000
+        const sourceTriggered = performance.now() - this.#lastSourceTriggeredPOWrite < 1000 // long enough threshold
         const invalidatedModules = new Set()
         for (const adapter of this.#adaptersByCatalogPath[ctx.file]) {
             const loc = adapter.catalogPathsToLocales[ctx.file]
@@ -103,7 +135,7 @@ class Plugin {
                 await adapter.loadCatalogNCompile(loc)
             }
             for (const loadID of adapter.getLoadIDs()) {
-                const fileID = `${virtualResolvedPrefix}${adapter.virtModEvent(loc, loadID)}`
+                const fileID = resolve(adapter.getCompiledFilePath(loc, loadID))
                 for (const module of ctx.server.moduleGraph.getModulesByFile(fileID) ?? []) {
                     ctx.server.moduleGraph.invalidateModule(
                         module,
@@ -120,56 +152,14 @@ class Plugin {
         }
     }
 
-    resolveId = (source: string, importer?: string) => {
-        if (!source.startsWith(virtualPrefix)) {
-            return null
-        }
-        return `${virtualResolvedPrefix}${source}?importer=${importer}`
-    }
-
-    load = (id: string) => {
-        const prefix = virtualResolvedPrefix + virtualPrefix
-        if (!id.startsWith(prefix)) {
-            return null
-        }
-        const [path, importer] = id.slice(prefix.length).split('?importer=')
-        const [part, ...rest] = path.split('/')
-        if (part === 'catalog') {
-            const [adapterKey, loadID, locale] = rest
-            const adapter = this.#adapters[adapterKey]
-            if (adapter == null) {
-                this.#log.error(`Adapter not found for key: ${adapterKey}`)
-                return null
-            }
-            return adapter.loadCatalogModule(locale, loadID, this.#hmrVersion)
-        }
-        if (part === 'locales') {
-            return `export const locales = ['${this.#locales.join("', '")}']`
-        }
-        if (part !== 'proxy') {
-            this.#log.error(`Unknown virtual request: ${id}`)
-            return null
-        }
-        // loader proxy
-        const adapter = this.#adaptersByLoaderPath[importer]
-        if (adapter == null) {
-            this.#log.error(`Adapter not found for filename: ${importer}`)
-            return
-        }
-        if (rest[0] === 'sync') {
-            return adapter.getProxySync()
-        }
-        return adapter.getProxy()
-    }
-
-    #transformHandler = async (code: string, id: string) => {
+    #transformHandler = async (code: string, id: string, options?: {ssr?: boolean}) => {
         if (!this.#config.hmr) {
             return {}
         }
         const filename = relative(this.#projectRoot, id)
         for (const adapter of Object.values(this.#adapters)) {
             if (adapter.fileMatches(filename)) {
-                return await adapter.transform(code, filename, this.#hmrVersion)
+                return await adapter.transform(code, filename, this.#hmrVersion, options?.ssr)
             }
         }
         return {}
@@ -178,4 +168,4 @@ class Plugin {
     transform = { order: <'pre'>'pre', handler: this.#transformHandler }
 }
 
-export const wuchale = (configPath?: string) => new Plugin(configPath)
+export const wuchale = (configPath?: string) => new Wuchale(configPath)

@@ -1,4 +1,5 @@
 import type { CompiledElement } from "./compile.js"
+import type { URLLocalizer } from "./url.js"
 
 type TxtScope = "script" | "markup" | "attribute"
 
@@ -8,7 +9,7 @@ export type HeuristicDetailsBase = {
     attribute?: string
 }
 
-export type ScriptDeclType = "variable" | "function" | "expression"
+export type ScriptDeclType = "variable" | "function" | "class" | "expression"
 
 export type HeuristicDetails = HeuristicDetailsBase & {
     file: string
@@ -22,44 +23,18 @@ export type HeuristicDetails = HeuristicDetailsBase & {
     call?: string
 }
 
-export type HeuristicFunc<T = HeuristicDetails> = (msgStr: string, details: T) => boolean | null | undefined
-
-export function defaultHeuristic(msgStr: string, details: HeuristicDetails) {
-    if (msgStr.search(/\p{L}/u) === -1) {
-        return false
-    }
-    if (details.scope === 'markup') {
-        return true
-    }
-    // script and attribute
-    // only allow non lower-case English letter beginnings
-    if (!/\p{L}/u.test(msgStr[0]) || /[a-z]/.test(msgStr[0])) {
-        return false
-    }
-    if (details.scope !== 'script') {
-        return true
-    }
-    if (details.declaring === 'expression' && !details.funcName) {
-        return false
-    }
-    return !details.call?.startsWith('console.')
-}
-
-// only allow inside function definitions for script scope
-export const defaultHeuristicFuncOnly: HeuristicFunc = (msgStr, details) => {
-    return defaultHeuristic(msgStr, details) && (details.scope !== 'script' || details.funcName != null)
-}
-
-export const defaultGenerateLoadID = (filename: string) => filename.replace(/[^a-zA-Z0-9_]+/g, '_')
+export type MessageType = 'message' | 'url'
 
 export class Message {
 
     msgStr: string[] // array for plurals
     plural: boolean = false
-    scope: TxtScope
     context: string
+    comments: string[] = []
+    details: HeuristicDetails
+    type: MessageType = 'message'
 
-    constructor(msgStr: string | string[], scope: TxtScope, context: string | null) {
+    constructor(msgStr: string | string[], heuristicDetails: HeuristicDetails, context: string | null) {
         if (typeof msgStr === 'string') {
             this.msgStr = [msgStr]
         } else {
@@ -68,7 +43,7 @@ export class Message {
         this.msgStr = this.msgStr.map(
             msg => msg.split('\n').map(line => line.trim()).join('\n')
         )
-        this.scope = scope
+        this.details = heuristicDetails
         this.context = context ?? null
     }
 
@@ -76,10 +51,90 @@ export class Message {
 
 }
 
-export type CommentDirectives = {
-    forceInclude?: boolean
-    context?: string
+export type HeuristicResultChecked = MessageType | false // after checking all heuristic functions
+export type HeuristicResult = HeuristicResultChecked | null | undefined
+
+export type HeuristicFunc = (msg: Message) => HeuristicResult
+
+export const defaultHeuristicOpts = {
+    ignoreElements: ['script', 'style', 'path', 'code', 'pre'],
+    ignoreAttribs: [['form', 'method']],
+    ignoreCalls: ['fetch'],
+    urlAttribs: [['a', 'href']],
+    urlCalls: [],
 }
+
+export type CreateHeuristicOpts = typeof defaultHeuristicOpts
+
+export function createHeuristic(opts: CreateHeuristicOpts): HeuristicFunc {
+    return msg => {
+        if (msg.details.element && opts.ignoreElements.includes(msg.details.element)) {
+            return false
+        }
+        if (msg.details.scope === 'attribute') {
+            for (const [element, attrib] of opts.ignoreAttribs) {
+                if (msg.details.element === element && msg.details.attribute === attrib) {
+                    return false
+                }
+            }
+        }
+        const msgStr = msg.msgStr.join('\n')
+        const looksLikeUrlPath = msgStr.startsWith('/') && !msgStr.includes(' ')
+        if (looksLikeUrlPath && (msg.details.scope === 'script' || msg.details.scope === 'attribute')) {
+            if (msg.details.call) {
+                for (const call of opts.urlCalls) {
+                    if (msg.details.call === call) {
+                        return 'url'
+                    }
+                }
+            }
+            if (msg.details.attribute) {
+                for (const [element, attrib] of opts.urlAttribs) {
+                    if (msg.details.element === element && msg.details.attribute === attrib) {
+                        return 'url'
+                    }
+                }
+            }
+        }
+        if (!/\p{L}/u.test(msgStr)) {
+            return false
+        }
+        if (msg.details.scope === 'markup') {
+            return 'message'
+        }
+        // script and attribute
+        // ignore:
+        //  non-letter beginnings
+        //  lower-case English letter beginnings
+        //  containing only upper-case English and non-letters
+        if (!/\p{L}/u.test(msgStr[0]) || /[a-z]/.test(msgStr[0]) || /^([A-Z]|\P{L})+$/u.test(msgStr)) {
+            return false
+        }
+        if (msg.details.scope === 'attribute') {
+            return 'message'
+        }
+        if (msg.details.declaring === 'expression' && !msg.details.funcName) {
+            return false
+        }
+        if (!msg.details.call?.startsWith('console.') && !opts.ignoreCalls.includes(msg.details.call)) {
+            return 'message'
+        }
+        return false
+    }
+}
+
+/** Default heuristic */
+export const defaultHeuristic = createHeuristic(defaultHeuristicOpts)
+
+/** Default heuristic which ignores messages outside functions in the `script` scope */
+export const defaultHeuristicFuncOnly: HeuristicFunc = msg => {
+    if (defaultHeuristic(msg) && (msg.details.scope !== 'script' || msg.details.funcName != null)) {
+        return 'message'
+    }
+    return false
+}
+
+export const defaultGenerateLoadID = (filename: string) => filename.replace(/[^a-zA-Z0-9_]+/g, '_')
 
 export class IndexTracker {
 
@@ -102,16 +157,23 @@ export type GlobConf = string | string[] | {
     ignore: string | string[],
 }
 
-export type TransformHeader = {
-    head: string,
-    expr: string,
+export type CatalogExpr = {
+    plain: string
+    reactive: string
 }
+
+export type TransformHeader = {
+    head: string
+}
+
+export type UrlMatcher = (url: string) => string | null | undefined
 
 type TransformCtx = {
     content: string
     filename: string
     index: IndexTracker
-    header: TransformHeader
+    expr: CatalogExpr
+    matchUrl: UrlMatcher
 }
 
 export type HMRData = {
@@ -119,7 +181,7 @@ export type HMRData = {
     data: Record<string, [number, CompiledElement][]>
 }
 
-export type TransformOutputFunc = (hmrData: HMRData | null) => {
+export type TransformOutputFunc = (header: string) => {
     code?: string
     map?: any
 }
@@ -129,36 +191,66 @@ export type TransformOutput = {
     msgs: Message[]
 }
 
-export type TransformFunc = (ctx: TransformCtx) => TransformOutput
+export type TransformFunc = (expr: TransformCtx) => TransformOutput
+
+export type WrapFunc = (expr: string) => string
+
+export type UseReactiveFunc = (details: {funcName?: string, nested: boolean, file: string, additional: object}) => {
+    /** null to disable initializing */
+    init: boolean | null
+    use: boolean
+}
+
+type RuntimeConfDetails = {
+    wrapInit: WrapFunc
+    wrapUse: WrapFunc
+}
+
+export type RuntimeConf = {
+    useReactive: UseReactiveFunc
+    plain: RuntimeConfDetails
+    reactive: RuntimeConfDetails
+}
+
+export type LoaderPath = {
+    client: string
+    server: string
+}
 
 export type AdapterPassThruOpts = {
     files: GlobConf
-    catalog: string
+    localesDir: string
+    /** if writing transformed code to a directory is desired, specify this */
+    outDir?: string
     granularLoad: boolean
-    bundleLoad: boolean,
-    generateLoadID: (filename: string) => string
-    loaderPath?: string
-    writeFiles: {
-        compiled?: boolean
-        proxy?: boolean
-        transformed?: boolean
-        outDir?: string
+    bundleLoad: boolean
+    url: {
+        patterns?: string[]
+        localize?: boolean | URLLocalizer
     }
+    generateLoadID: (filename: string) => string
+    runtime: Partial<RuntimeConf>
 }
 
 export type Adapter = AdapterPassThruOpts & {
     transform: TransformFunc
     /** possible filename extensions for loader. E.g. `.js` */
     loaderExts: string[]
-    /** available loader names, can do auto detection logic to sort, dependencies given */
-    defaultLoaders: () => string[] | Promise<string[]>
-    /* Can return different file paths based on conditions */
-    defaultLoaderPath: (loaderName: string) => string
-    /* docs specific to the adapter */
-    docsUrl: string
+    /** default loaders to copy, `null` means custom */
+    defaultLoaderPath: LoaderPath | string | null
+    /** names to import from loaders, should avoid collision with code variables */
+    getRuntimeVars?: Partial<CatalogExpr>
 }
 
-export type AdapterArgs = Partial<AdapterPassThruOpts> & {
+export type CodePattern = {
+    name: string
+    args: ('message' | 'pluralFunc' | 'locale' | 'other')[]
+}
+
+export type LoaderChoice<LoadersAvailable> = LoadersAvailable | string & {} | 'custom'
+
+export type AdapterArgs<LoadersAvailable> = Partial<AdapterPassThruOpts> & {
+    loader: LoaderChoice<LoadersAvailable>
     heuristic?: HeuristicFunc
-    pluralsFunc?: string
+    patterns?: CodePattern[]
 }

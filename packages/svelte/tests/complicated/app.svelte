@@ -9,6 +9,7 @@
 </script>
 
 <script>
+    import {someSnippet} from './foo'
 
     async function someFunctionAsync(name) {
         const json = {}
@@ -36,7 +37,7 @@
     }
 
     const derive = $derived.by(() => {
-        const f = obj.property["Extract this"]
+        const f = obj?.property?.["Extract this"]
         if (!f) return
         let e = {}
         if (f == 'something else') {
@@ -61,6 +62,10 @@
     })
 </script>
 
+<svelte:head>
+    <title>Extract {p.name}</title>
+</svelte:head>
+
 <div>{someFunction('foo', 'Bar')}</div>
 
 <p>
@@ -74,9 +79,11 @@
     {#if someFunction("Extracted Text", normalParam, [/* @wc-include */ "extracted anyway"])}
         Conditionals,
         {#each collection.members as member}
-            Loops and {member}
+            {@const x = member['That']}
+            Loops and {member} {x}
             <!-- What not -->
             {#await someFunctionAsync(derive) then json}
+                {@render someSnippet('Bar')}
                 <b>{json.title} other blocks</b>
             {/await}
             Supported

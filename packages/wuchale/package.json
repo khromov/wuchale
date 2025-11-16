@@ -1,6 +1,6 @@
 {
     "name": "wuchale",
-    "version": "0.14.5",
+    "version": "0.18.5",
     "description": "Protobuf-like i18n from plain code",
     "scripts": {
         "dev": "tsc --watch",
@@ -28,8 +28,7 @@
     ],
     "files": [
         "dist",
-        "src/adapter-vanilla/loaders",
-        "src/virtual.d.ts"
+        "src/adapter-vanilla/loaders"
     ],
     "exports": {
         ".": {
@@ -60,6 +59,10 @@
         "./adapter-utils": {
             "types": "./dist/adapter-utils/index.d.ts",
             "default": "./dist/adapter-utils/index.js"
+        },
+        "./url": {
+            "types": "./dist/url.d.ts",
+            "default": "./dist/url.js"
         }
     },
     "bin": {
@@ -74,18 +77,19 @@
     "author": "K1DV5",
     "license": "MIT",
     "dependencies": {
-        "@sveltejs/acorn-typescript": "^1.0.5",
+        "@sveltejs/acorn-typescript": "^1.0.6",
         "acorn": "^8.15.0",
         "chokidar": "^4.0.3",
-        "magic-string": "^0.30.18",
+        "magic-string": "^0.30.21",
+        "path-to-regexp": "^8.3.0",
         "picomatch": "^4.0.3",
         "pofile": "^1.1.4",
-        "tinyglobby": "^0.2.14"
+        "tinyglobby": "^0.2.15"
     },
     "devDependencies": {
-        "@types/node": "^24.3.0",
+        "@types/node": "^24.10.0",
         "@types/picomatch": "^4.0.1",
-        "typescript": "^5.8.3"
+        "typescript": "^5.9.3"
     },
     "type": "module"
 }

@@ -3,33 +3,34 @@
 // @ts-ignore
 import { testContentSetup, testDirSetup, absDir, typescript } from '../../wuchale/tests/check.js'
 import { rm } from 'fs/promises'
-import { relative } from 'path'
 import { adapter } from '@wuchale/jsx'
 
 const dirBase = absDir(import.meta.url)
-const adapterOpts = {
-    files: `${dirBase}/test-tmp/*`,
-    catalog: `${dirBase}/test-tmp/{locale}`
+export const adapterOpts = {
+    files: `${dirBase}/test-dir/*`,
+    localesDir: `${dirBase}/test-tmp/`,
+    loader: 'default',
 }
 
-const sv = adapter(adapterOpts)
-
-const testFile = relative(dirBase, `${dirBase}/test-tmp/test.jsx`)
+const testFile = `${dirBase}/test-dir/test.jsx`
 
 /**
  * @param {any} t
  * @param {string} content
  * @param {string} expectedContent
  * @param {string} expectedTranslations
- * @param {string[] | string[][]} expectedCompiled
+ * @param {(string | (string | number | (string | number)[])[])[]} expectedCompiled
  * @param {string} [filename]
+ * @param {object} [conf]
  */
-export async function testContent(t, content, expectedContent, expectedTranslations, expectedCompiled, filename) {
+export async function testContent(t, content, expectedContent, expectedTranslations, expectedCompiled, filename, conf = adapterOpts) {
     try {
-        await rm(adapterOpts.catalog.replace('{locale}', 'en.po'))
+        await rm(adapterOpts.localesDir, {recursive: true})
     } catch {}
-    await testContentSetup(t, sv, 'jsx', content, expectedContent, expectedTranslations, expectedCompiled, filename ?? testFile)
+    await testContentSetup(t, adapter(conf), 'jsx', content, expectedContent, expectedTranslations, expectedCompiled, filename ?? testFile)
 }
+
+const jx = adapter(adapterOpts)
 
 /**
  * @param {any} t
@@ -39,15 +40,19 @@ export async function testDir(t, dir) {
     try {
         await rm(adapterOpts.catalog.replace('{locale}', 'en.po'))
     } catch {}
-    await testDirSetup(t, sv, 'jsx', `${dirBase}/${dir}`, 'app.jsx', 'app.out.jsx')
+    await testDirSetup(t, jx, 'jsx', `${dirBase}/${dir}`, 'app.jsx', 'app.out.jsx')
 }
 
 // only for syntax highlighting
-export const jsx = typescript
+export const tsx = typescript
 
 // import { getOutput } from '../../wuchale/tests/check.js'
-// const code = jsx`const m = <main> Hello <i>dear</i></main>`
-// const p = await getOutput(sv, 'jsx', code, testFile)
+// const code = tsx`
+// function m() {
+//   return <p>Hello!</p>
+// }
+// `
+// const p = await getOutput(jx, 'jsx', code, testFile, -1)
 // console.log(p.code)
 // // console.log(Object.values(p.catalogs.en))
-// console.log(p.compiled.en?.items)
+// // console.log(p.compiled.en?.items)

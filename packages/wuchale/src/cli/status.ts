@@ -23,12 +23,23 @@ async function statPO(filename: string): Promise<POStats> {
     return stats
 }
 
-export async function status(config: Config, locales: string[], logger: Logger) {
-    logger.log(`Locales: ${locales.map(l => color.cyan(`${l} (${getLanguageName(l)})`)).join(', ')}`)
+export async function status(config: Config, locales: string[]) {
+    // console.log because if the user invokes this command, they want full info regardless of config
+    console.log(`Locales: ${locales.map(l => color.cyan(`${l} (${getLanguageName(l)})`)).join(', ')}`)
     for (const [key, adapter] of Object.entries(config.adapters)) {
-        const handler = new AdapterHandler(adapter, key, config, 'extract', 'extract', process.cwd(), new Logger(config.messages))
-        const {path: loaderPath, empty} = await handler.getLoaderPath()
-        logger.log(`${color.magenta(key)}:`)
+        const handler = new AdapterHandler(adapter, key, config, 'cli', process.cwd(), new Logger(config.logLevel))
+        const loaderPath = await handler.getLoaderPath()
+        console.log(`${color.magenta(key)}:`)
+        if (loaderPath) {
+            console.log(`  Loader files:`)
+            for (const [side, path] of Object.entries(loaderPath)) {
+                console.log(`    ${color.cyan(side)}: ${color.cyan(path)}`)
+            }
+        } else {
+            console.warn(color.yellow('  No loader file found.'))
+            console.log(`  Run ${color.cyan('npx wuchale init')} to initialize.`)
+        }
+        const statsData: Record<string, {Total: number, Untranslated: number, Obsolete: number}> = {}
         for (const locale of locales) {
             let stats: POStats
             try {
@@ -37,26 +48,17 @@ export async function status(config: Config, locales: string[], logger: Logger) 
                 if (err.code !== 'ENOENT') {
                     throw err
                 }
-                logger.warn(`  No catalog found.`)
+                console.warn(color.yellow('  No catalog found.'))
                 continue
             }
             const {total, obsolete, untranslated} = stats
             const locName = getLanguageName(locale)
-            logger.log([
-                `  ${locName}: ${color.cyan(`total: ${total} `)}`,
-                color.yellow(`untranslated: ${untranslated} `),
-                color.grey(`obsolete: ${obsolete}`),
-            ].join(' '))
+            statsData[locName] = {
+                Total: total,
+                Untranslated: untranslated,
+                Obsolete: obsolete,
+            }
         }
-        if (loaderPath && !empty) {
-            logger.log(`  Loader file: ${color.cyan(loaderPath)}`)
-            continue
-        }
-        if (loaderPath) {
-            logger.warn(`  Loader file empty at ${color.cyan(loaderPath)}`)
-        } else {
-            logger.warn('  No loader file found.')
-        }
-        logger.log(`  Run ${color.cyan('npx wuchale init')} to initialize.`)
+        console.table(statsData)
     }
 }

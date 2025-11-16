@@ -6,55 +6,84 @@ import type {
     AdapterArgs,
     Adapter,
     AdapterPassThruOpts,
+    RuntimeConf,
+    CodePattern,
+    LoaderChoice,
 } from "../adapters.js"
-import { initRuntimeStmt, Transformer } from "./transformer.js"
-import { getDependencies } from '../adapter-utils/index.js'
+import { Transformer } from "./transformer.js"
+import { loaderPathResolver } from '../adapter-utils/index.js'
 
 export { Transformer }
-export { parseScript, scriptParseOptions, scriptParseOptionsWithComments, initRuntimeStmt } from './transformer.js'
+export { parseScript, scriptParseOptions, scriptParseOptionsWithComments } from './transformer.js'
 
-const defaultArgs: AdapterArgs = {
+export const pluralPattern: CodePattern = {
+    name: 'plural',
+    args: ['other', 'message', 'pluralFunc'],
+}
+
+type LoadersAvailable = 'server' | 'vite'
+
+const defaultArgs: AdapterArgs<LoadersAvailable> = {
     files: { include: 'src/**/*.{js,ts}', ignore: '**/*.d.ts' },
-    catalog: './src/locales/{locale}',
-    pluralsFunc: 'plural',
+    localesDir: './src/locales',
+    patterns: [pluralPattern],
     heuristic: defaultHeuristicFuncOnly,
     granularLoad: false,
     bundleLoad: false,
     generateLoadID: defaultGenerateLoadID,
-    writeFiles: {},
+    loader: 'vite',
+    runtime: {
+        useReactive: ({nested}) => ({
+            init: nested ? null : false,
+            use: nested ? null : false,
+        }),
+        plain: {
+            wrapInit: expr => expr,
+            wrapUse: expr => expr,
+        }
+    }
 }
 
-export const adapter = (args: AdapterArgs = defaultArgs): Adapter => {
+const resolveLoaderPath = loaderPathResolver(import.meta.url, '../../src/adapter-vanilla/loaders', 'js')
+
+export function getDefaultLoaderPath(loader: LoaderChoice<LoadersAvailable>, bundle: boolean) {
+    if (loader === 'custom') {
+        return null
+    }
+    if (bundle) {
+        return resolveLoaderPath('bundle')
+    }
+    if (loader === 'vite') {
+        return {
+            client: resolveLoaderPath('vite'),
+            server: resolveLoaderPath('vite.ssr'),
+        }
+    }
+    return resolveLoaderPath(loader)
+}
+
+export const adapter = (args: AdapterArgs<LoadersAvailable> = defaultArgs): Adapter => {
     const {
         heuristic,
-        pluralsFunc,
+        patterns,
+        runtime,
+        loader,
         ...rest
     } = deepMergeObjects(args, defaultArgs)
     return {
-        transform: ({ content, filename, index, header }) => new Transformer(
+        transform: ({ content, filename, index, expr, matchUrl }) => new Transformer(
             content,
             filename,
             index,
             heuristic,
-            pluralsFunc,
-            initRuntimeStmt(header.expr),
-        ).transform(header.head),
+            patterns,
+            expr,
+            runtime as RuntimeConf,
+            matchUrl,
+        ).transform(),
         loaderExts: ['.js', '.ts'],
-        defaultLoaders: async () => {
-            if (rest.bundleLoad) {
-                return ['bundle']
-            }
-            const deps = await getDependencies()
-            const available = ['server']
-            if (deps.has('vite')) {
-                available.unshift('vite')
-            }
-            return available
-        },
-        defaultLoaderPath: (loader: string) => {
-            return new URL(`../../src/adapter-vanilla/loaders/${loader}.js`, import.meta.url).pathname
-        },
-        ...rest as AdapterPassThruOpts,
-        docsUrl: 'https://wuchale.dev/adapters/vanilla'
+        defaultLoaderPath: getDefaultLoaderPath(loader, rest.bundleLoad),
+        runtime,
+        ...rest as Omit<AdapterPassThruOpts, 'runtime'>,
     }
 }

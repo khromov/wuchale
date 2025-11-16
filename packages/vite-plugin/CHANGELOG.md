@@ -1,5 +1,151 @@
 # @wuchale/vite-plugin
 
+## 0.15.3
+
+### Patch Changes
+
+- a1a31f9: Fix errors during build due to granular load IDs and TS types
+- Updated dependencies [a1a31f9]
+  - wuchale@0.18.3
+
+## 0.15.2
+
+### Patch Changes
+
+- 12d17f7: Fix inconsistent wuchale versions
+
+## 0.15.1
+
+### Patch Changes
+
+- 3d451d3: Update after fix compiled catalogs writing
+
+## 0.15.0
+
+### Minor Changes
+
+- 37deb80: Always use physical files, change `catalog` config to `localesDir`
+
+  Previusly virtual modules offered by Vite made it possible to keep the file system
+  clean and a slight performance advantage when building, but they had disadvantages:
+
+  - Inspecting what Wuchale generates was not possible unless the `writeFiles` config was enabled
+  - They don't work outside of Vite
+  - Supporting physical files was therefore unavoidable and that meant supporting two different systems to export the same things
+
+  Now everything is written to disk, including proxies, compiled catalogs, and
+  locales data too. And `writeFiles` has been removed. In cases where writing the
+  transformed code is desired, the destination can be provided to the `outDir` adapter
+  config.
+
+  The second thing is that the location of the catalog files was previusly
+  specified using the `catalog` adapter config, which accepted a substitution
+  parameter, `{locale}` but it's an unnecessary complexity that can lead to
+  problems, and it's not just catalogs that's stored in that location. Therefore,
+  it has been replaced by the self descriptive config, `localesDir`.
+
+### Patch Changes
+
+- Updated dependencies [37deb80]
+- Updated dependencies [37deb80]
+- Updated dependencies [37deb80]
+- Updated dependencies [37deb80]
+- Updated dependencies [37deb80]
+- Updated dependencies [9d1dff8]
+  - wuchale@0.18.0
+
+## 0.14.8
+
+### Patch Changes
+
+- 0e3fcd6: Avoid load hook path importer collisions causing problems with vitest
+
+## 0.14.7
+
+### Patch Changes
+
+- 16b116c: Customizable log levels, add verbose level where all extracted messages are shown
+- Updated dependencies [5a221a2]
+- Updated dependencies [15cf377]
+- Updated dependencies [0b5c207]
+- Updated dependencies [16b116c]
+- Updated dependencies [22198c1]
+- Updated dependencies [6d0a4d3]
+- Updated dependencies [d531bcc]
+- Updated dependencies [9f997c2]
+  - wuchale@0.17.0
+
+## 0.14.6
+
+### Patch Changes
+
+- 973848b: Fix HMR having problems with lazy loaded files
+- Updated dependencies [973848b]
+  - wuchale@0.16.1
+
+## 0.14.5
+
+### Patch Changes
+
+- Updated dependencies [fef0d11]
+- Updated dependencies [4fcf264]
+- Updated dependencies [46aa3f2]
+- Updated dependencies [37367ca]
+- Updated dependencies [f07d484]
+  - wuchale@0.16.0
+
+## 0.14.4
+
+### Patch Changes
+
+- 36a2821: Fix windows problems with loader paths
+
+## 0.14.3
+
+### Patch Changes
+
+- 14a1b1f: Revert to manual types for vite plugin to fix build errors
+
+## 0.14.2
+
+### Patch Changes
+
+- 5ec75dc: Use component in components to preserve non string types
+
+  This is mainly relevant to the JSX adapter, where components themselves can be
+  passed around as values and props, and previously, if they are in expressions
+  like this:
+
+  ```jsx
+  const msg = <b>Hello</b>;
+  return <p>{msg} and welcome</p>;
+  ```
+
+  The `msg` would be converted into a string and it would become `[object Object]`.
+
+  Now this has been fixed.
+
+- Updated dependencies [5ec75dc]
+  - wuchale@0.15.4
+
+## 0.14.1
+
+### Patch Changes
+
+- c70b2d7: Fix build error because of type differences
+
+## 0.14.0
+
+### Minor Changes
+
+- af21188: Optional support for separate loader for SSR
+
+### Patch Changes
+
+- Updated dependencies [af21188]
+- Updated dependencies [26ce0c3]
+  - wuchale@0.15.0
+
 ## 0.13.2
 
 ### Patch Changes

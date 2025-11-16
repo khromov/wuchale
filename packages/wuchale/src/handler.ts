@@ -1,17 +1,19 @@
-// $$ cd ../.. && npm run test
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, resolve, normalize, relative, join } from 'node:path'
+import { platform } from 'node:process'
+import { glob } from "tinyglobby"
 import { IndexTracker, Message } from "./adapters.js"
-import type { Adapter, GlobConf, HMRData } from "./adapters.js"
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { compileTranslation, type CompiledElement } from "./compile.js"
-import GeminiQueue, { type ItemType } from "./gemini.js"
+import type { Adapter, CatalogExpr, GlobConf, HMRData, LoaderPath } from "./adapters.js"
+import { mkdir, readFile, statfs, writeFile } from 'node:fs/promises'
+import { compileTranslation, type CompiledElement, type Mixed } from "./compile.js"
+import AIQueue, { type ItemType } from "./ai/index.js"
 import pm, { type Matcher } from 'picomatch'
 import PO from "pofile"
-import { normalize } from "node:path"
 import { type ConfigPartial, getLanguageName } from "./config.js"
 import { color, type Logger } from './log.js'
 import { catalogVarName } from './runtime.js'
-import { runtimeVars } from './adapter-utils/index.js'
+import { varNames } from './adapter-utils/index.js'
+import { match as matchUrlPattern, compile as compileUrlPattern, pathToRegexp, type Token, stringify } from 'path-to-regexp'
+import { localizeDefault, type URLLocalizer, type URLManifest } from './url.js'
 
 type PluralRule = {
     nplurals: number
@@ -29,8 +31,19 @@ type POFile = {
     catalog: Catalog
     headers: Record<string, string>
     pluralRule: PluralRule
-    loaded: boolean
 }
+
+const dataFileName = 'data.js'
+const generatedDir = '.wuchale'
+export const urlPatternFlag = 'url-pattern'
+const urlExtractedFlag = 'url-extracted'
+
+const loaderImportGetRuntime = 'getRuntime'
+const loaderImportGetRuntimeRx = 'getRuntimeRx'
+
+const getFuncPlainDefault = '_w_load_'
+const getFuncReactiveDefault = getFuncPlainDefault + 'rx_'
+const bundleCatalogsVarName = '_w_catalogs_'
 
 const objKeyLocale = (locale: string) => locale.includes('-') ? `'${locale}'` : locale
 
@@ -61,8 +74,15 @@ async function loadCatalogFromPO(filename: string): Promise<POFile> {
     } else {
         pluralRule = defaultPluralRule
     }
-    return { catalog, pluralRule, headers: po.headers, loaded: true }
+    return { catalog, pluralRule, headers: po.headers }
 }
+
+function poDumpToString(items: ItemType[]) {
+    const po = new PO()
+    po.items = items
+    return po.toString()
+}
+
 
 async function saveCatalogToPO(catalog: Catalog, filename: string, headers = {}): Promise<void> {
     const po = new PO()
@@ -92,7 +112,7 @@ async function saveCatalogToPO(catalog: Catalog, filename: string, headers = {})
     })
 }
 
-export type Mode = 'dev' | 'prod' | 'extract'
+export type Mode = 'dev' | 'build' | 'cli'
 
 type Compiled = {
     hasPlurals: boolean
@@ -102,34 +122,37 @@ type Compiled = {
 type CompiledCatalogs = Record<string, Compiled>
 
 type SharedState = {
+    ownerKey: string
     poFilesByLoc: Record<string, POFile>
+    compiled: CompiledCatalogs
+    extractedUrls: Record<string, Catalog>
+    indexTracker: IndexTracker
+}
+
+/* shared states among multiple adapters handlers, by localesDir */
+export type SharedStates = Record<string, SharedState>
+
+type GranularState = {
+    id: string
     compiled: CompiledCatalogs
     indexTracker: IndexTracker
 }
 
-/* shared states among multiple adapters handlers */
-export type SharedStates = Record<string, SharedState>
-
-type GranularState = {
-    id: string,
-    compiled: CompiledCatalogs,
-    indexTracker: IndexTracker,
-}
+type TransformOutputCode = { code?: string, map?: any }
 
 export class AdapterHandler {
 
     key: string
 
     // paths
-    loaderPath: string
+    loaderPath: LoaderPath
     proxyPath: string
-    outDir: string
-    compiledHead: Record<string, string> = {}
+    proxySyncPath: string
 
-    #virtualPrefix: string
     #config: ConfigPartial
     #locales: string[]
     fileMatches: Matcher
+    localizeUrl?: URLLocalizer
     #projectRoot: string
 
     #adapter: Adapter
@@ -141,197 +164,391 @@ export class AdapterHandler {
     granularStateByID: Record<string, GranularState> = {}
 
     #catalogsFname: Record<string, string> = {}
+    #urlPatternKeys: Record<string, string> = {}
+    #urlManifestFname: string
+    #urlsFname: string
+    #generatedDir: string
     catalogPathsToLocales: Record<string, string> = {}
 
     #mode: Mode
-    #geminiQueue: Record<string, GeminiQueue> = {}
+    #geminiQueue: Record<string, AIQueue> = {}
 
     #log: Logger
 
-    constructor(adapter: Adapter, key: string | number, config: ConfigPartial, mode: Mode, virtualPrefix: string, projectRoot: string, log: Logger) {
+    onBeforeWritePO: () => void
+
+    constructor(adapter: Adapter, key: string, config: ConfigPartial, mode: Mode, projectRoot: string, log: Logger) {
         this.#adapter = adapter
-        this.key = key.toString()
+        this.key = key
         this.#mode = mode
-        this.#virtualPrefix = virtualPrefix
         this.#projectRoot = projectRoot
         this.#config = config
         this.#log = log
+        this.#generatedDir = `${adapter.localesDir}/${generatedDir}`
+        if (typeof adapter.url?.localize === 'function') {
+            this.localizeUrl = adapter.url.localize
+        } else if (adapter.url?.localize) {
+            this.localizeUrl = localizeDefault
+        }
     }
 
-    getLoaderPaths(): string[] {
-        if (this.#adapter.loaderPath != null) {
-            return [this.#adapter.loaderPath]
-        }
-        const catalogToLoader = this.#adapter.catalog.replace('{locale}', 'loader')
-        const paths: string[] = []
+    getLoaderPaths(): LoaderPath[] {
+        const loaderPathHead = join(this.#adapter.localesDir, `${this.key}.loader`)
+        const paths: LoaderPath[] = []
         for (const ext of this.#adapter.loaderExts) {
-            let path = catalogToLoader + ext
-            if (path.startsWith('./')) {
-                path = path.slice(2)
+            const pathClient = loaderPathHead + ext
+            const same = { client: pathClient, server: pathClient }
+            const diff = { client: pathClient, server: loaderPathHead + '.server' + ext}
+            if (this.#adapter.defaultLoaderPath == null) {
+                paths.push(diff, same)
+            } else if (typeof this.#adapter.defaultLoaderPath === 'string') { // same file for both
+                paths.push(same)
+            } else {
+                paths.push(diff)
             }
-            paths.push(path)
         }
         return paths
     }
 
-    async getLoaderPath(): Promise<{ path: string | null, empty: boolean }> {
-        for (const path of this.getLoaderPaths()) {
-            try {
-                const contents = await readFile(path)
-                return { path, empty: contents.toString().trim() === '' }
-            } catch (err: any) {
-                if (err.code !== 'ENOENT') {
-                    throw err
+    async getLoaderPath(): Promise<LoaderPath> {
+        const paths = this.getLoaderPaths()
+        for (const path of paths) {
+            let bothExist = true
+            for (const side in path) {
+                try {
+                    await statfs(path[side])
+                } catch (err: any) {
+                    if (err.code !== 'ENOENT') {
+                        throw err
+                    }
+                    bothExist = false
+                    break
                 }
+            }
+            if (!bothExist) {
                 continue
             }
+            return path
         }
-        return { path: null, empty: true }
+        return paths[0]
+    }
+
+    #proxyFileName(sync = false) {
+        let namePart = `${this.key}.proxy`
+        if (sync) {
+            return `${namePart}.sync.js`
+        }
+        return `${namePart}.js`
     }
 
     async #initPaths() {
-        const { path: loaderPath, empty } = await this.getLoaderPath()
-        if (!loaderPath || empty) {
-            throw new Error('No valid loader file found.')
-        }
-        this.loaderPath = loaderPath
-        this.proxyPath = this.#adapter.catalog.replace('{locale}', 'proxy') + this.#adapter.loaderExts[0]
-        this.outDir = this.#adapter.writeFiles.outDir
-        if (!this.outDir) {
-            this.outDir = this.#adapter.catalog.replace('{locale}', '.output')
-        }
-        for (const loc of this.#locales) {
-            this.compiledHead[loc] = this.#adapter.catalog.replace('{locale}', loc) + '.compiled.' // + id + ext
-        }
+        this.loaderPath = await this.getLoaderPath()
+        this.proxyPath = join(this.#generatedDir, this.#proxyFileName())
+        this.proxySyncPath = join(this.#generatedDir, this.#proxyFileName(true))
+        this.#urlManifestFname = join(this.#generatedDir, `${this.key}.urls.js`)
+        this.#urlsFname = join(this.#adapter.localesDir, `${this.key}.url.js`)
     }
 
-    /** Get both catalog virtual module names AND HMR event names */
-    virtModEvent = (locale: string, loadID: string | null) => `${this.#virtualPrefix}catalog/${this.key}/${loadID ?? this.key}/${locale}`
-
-    #getCompiledFilePath(loc: string, id: string | null) {
-        return this.compiledHead[loc] + (id ?? this.key) + this.#adapter.loaderExts[0]
+    getCompiledFilePath(loc: string, id: string | null) {
+        const ownerKey = this.sharedState.ownerKey
+        return join(this.#generatedDir, `${ownerKey}.${id ?? ownerKey}.${loc}.compiled.js`)
     }
 
-    #getCompiledImport(loc: string, id: string | null, proxyFilePath?: string) {
-        if (proxyFilePath) {
-            return './' + basename(this.#getCompiledFilePath(loc, id))
+    #getImportPath(filename: string, importer?: string) {
+        filename = relative(dirname(importer ?? filename), filename)
+        if (platform === 'win32') {
+            filename = filename.replaceAll('\\', '/')
         }
-        return this.virtModEvent(loc, id)
+        if (!filename.startsWith('.')) {
+            filename = `./${filename}`
+        }
+        return filename
     }
 
-    #loaderLoadIDsNKey(loadIDs: string[]) {
-        return `
-            export const loadIDs = ['${loadIDs.join("', '")}']
-            export const key = '${this.key}'
-        `
-    }
-
-    getLoadIDs(): string[] {
+    getLoadIDs(forImport = false): string[] {
         const loadIDs: string[] = []
         if (this.#adapter.granularLoad) {
-            for (const loadID in this.granularStateByID) {
-                loadIDs.push(loadID)
+            for (const state of Object.values(this.granularStateByID)) {
+                // only the ones with ready messages
+                if (state.compiled[this.#config.sourceLocale].items.length) {
+                    loadIDs.push(state.id)
+                }
             }
+        } else if (forImport) {
+            loadIDs.push(this.sharedState.ownerKey)
         } else {
             loadIDs.push(this.key)
         }
         return loadIDs
     }
 
-    getProxy(proxyFilePath?: string) {
+    getProxy() {
         const imports = []
         const loadIDs = this.getLoadIDs()
-        for (const id of loadIDs) {
+        const loadIDsImport = this.getLoadIDs(true)
+        for (const [i, id] of loadIDs.entries()) {
             const importsByLocale = []
             for (const loc of this.#locales) {
-                importsByLocale.push(`${objKeyLocale(loc)}: () => import('${this.#getCompiledImport(loc, id, proxyFilePath)}')`)
+                importsByLocale.push(`${objKeyLocale(loc)}: () => import('${this.#getImportPath(this.getCompiledFilePath(loc, loadIDsImport[i]))}')`)
             }
             imports.push(`${id}: {${importsByLocale.join(',')}}`)
         }
         return `
+            /** @type {{[loadID: string]: {[locale: string]: () => Promise<import('wuchale/runtime').CatalogModule>}}} */
             const catalogs = {${imports.join(',')}}
-            export const loadCatalog = (loadID, locale) => catalogs[loadID][locale]()
-            ${this.#loaderLoadIDsNKey(loadIDs)}
+            export const loadCatalog = (/** @type {string} */ loadID, /** @type {string} */ locale) => catalogs[loadID][locale]()
+            export const loadIDs = ['${loadIDs.join("', '")}']
         `
     }
 
-    getProxySync(proxyFilePath?: string) {
+    getProxySync() {
         const loadIDs = this.getLoadIDs()
+        const loadIDsImport = this.getLoadIDs(true)
         const imports = []
         const object = []
-        for (const id of loadIDs) {
+        for (const [il, id] of loadIDs.entries()) {
             const importedByLocale = []
             for (const [i, loc] of this.#locales.entries()) {
                 const locKey = `_w_c_${id}_${i}_`
-                imports.push(`import * as ${locKey} from '${this.#getCompiledImport(loc, id, proxyFilePath)}'`)
+                imports.push(`import * as ${locKey} from '${this.#getImportPath(this.getCompiledFilePath(loc, loadIDsImport[il]))}'`)
                 importedByLocale.push(`${objKeyLocale(loc)}: ${locKey}`)
             }
             object.push(`${id}: {${importedByLocale.join(',')}}`)
         }
         return `
             ${imports.join('\n')}
+            /** @type {{[loadID: string]: {[locale: string]: import('wuchale/runtime').CatalogModule}}} */
             const catalogs = {${object.join(',')}}
-            export const loadCatalog = (loadID, locale) => catalogs[loadID][locale]
-            ${this.#loaderLoadIDsNKey(loadIDs)}
+            export const loadCatalog = (/** @type {string} */ loadID, /** @type {string} */ locale) => catalogs[loadID][locale]
+            export const loadIDs = ['${loadIDs.join("', '")}']
         `
     }
 
+    getData() {
+        return [
+            `export const sourceLocale = '${this.#config.sourceLocale}'`,
+            `export const otherLocales = ['${this.#config.otherLocales.join("','")}']`,
+            `export const locales = ['${this.#locales.join("','")}']`,
+        ].join('\n')
+    }
+
     catalogFileName = (locale: string): string => {
-        let catalog = this.#adapter.catalog.replace('{locale}', locale)
+        let catalog = join(this.#adapter.localesDir, `${locale}.po`)
         if (!isAbsolute(catalog)) {
             catalog = normalize(`${this.#projectRoot}/${catalog}`)
         }
-        return `${catalog}.po`
+        return catalog
+    }
+
+    #initFiles = async () => {
+        if (this.#adapter.defaultLoaderPath == null) {
+            // using custom loaders
+            return
+        }
+        await mkdir(this.#generatedDir, {recursive: true})
+        for (const side in this.loaderPath) {
+            let loaderTemplate: string
+            if (typeof this.#adapter.defaultLoaderPath === 'string') {
+                loaderTemplate = this.#adapter.defaultLoaderPath
+            } else {
+                loaderTemplate = this.#adapter.defaultLoaderPath[side]
+            }
+            const loaderContent = (await readFile(loaderTemplate)).toString()
+                .replace('${PROXY}', `./${generatedDir}/${this.#proxyFileName()}`)
+                .replace('${PROXY_SYNC}', `./${generatedDir}/${this.#proxyFileName(true)}`)
+                .replace('${DATA}', `./${dataFileName}`)
+                .replace('${KEY}', this.key)
+            await writeFile(this.loaderPath[side], loaderContent)
+        }
+        await writeFile(join(this.#adapter.localesDir, dataFileName), this.getData())
+    }
+
+    urlPatternFromTranslate = (patternTranslated: string, keys: Token[]) => {
+        const compiledTranslatedPatt = compileTranslation(patternTranslated, patternTranslated)
+        if (typeof compiledTranslatedPatt === 'string') {
+            return compiledTranslatedPatt
+        }
+        const urlTokens: Token[] = (compiledTranslatedPatt as Mixed).map(part => {
+            if (typeof part === 'number') {
+                return keys[part]
+            }
+            return {type: 'text', value: part}
+        })
+        return stringify({tokens: urlTokens})
+    }
+
+    writeUrlFiles = async () => {
+        const patterns = this.#adapter.url?.patterns
+        if (!patterns) {
+            return
+        }
+        const manifest: URLManifest = patterns.map(patt => {
+            const catalogPattKey = this.#urlPatternKeys[patt]
+            const {keys} = pathToRegexp(patt)
+            return [
+                patt,
+                this.#locales.map(loc => {
+                    let pattern = patt
+                    const item = this.sharedState.poFilesByLoc[loc].catalog[catalogPattKey]
+                    if (item) {
+                        const patternTranslated = item.msgstr[0] || item.msgid
+                        pattern = this.urlPatternFromTranslate(patternTranslated, keys)
+                    }
+                    return this.localizeUrl?.(pattern, loc) ?? pattern
+                })
+            ]
+        })
+        const urlManifestData = [
+            `/** @type {import('wuchale/url').URLManifest} */`,
+            `export default ${JSON.stringify(manifest)}`,
+        ].join('\n')
+        await writeFile(this.#urlManifestFname, urlManifestData)
+        const urlFileContent = [
+            'import {URLMatcher, getLocaleDefault} from "wuchale/url"',
+            `import {locales} from "./${dataFileName}"`,
+            `import manifest from "./${relative(dirname(this.#urlsFname), this.#urlManifestFname)}"`,
+            `export const getLocale = (/** @type {URL} */ url) => getLocaleDefault(url, locales) ?? '${this.#config.sourceLocale}'`,
+            `export const matchUrl = URLMatcher(manifest, locales)`
+        ].join('\n')
+        await writeFile(this.#urlsFname, urlFileContent)
     }
 
     init = async (sharedStates: SharedStates) => {
         this.#locales = [this.#config.sourceLocale, ...this.#config.otherLocales]
         await this.#initPaths()
+        await this.#initFiles()
         this.fileMatches = pm(...this.globConfToArgs(this.#adapter.files))
         const sourceLocaleName = getLanguageName(this.#config.sourceLocale)
-        this.sharedState = sharedStates[this.#adapter.catalog]
+        this.sharedState = sharedStates[this.#adapter.localesDir]
         if (this.sharedState == null) {
             this.sharedState = {
+                ownerKey: this.key,
                 poFilesByLoc: {},
                 indexTracker: new IndexTracker(),
                 compiled: {},
+                extractedUrls: {},
             }
-            sharedStates[this.#adapter.catalog] = this.sharedState
+            sharedStates[this.#adapter.localesDir] = this.sharedState
         }
         this.catalogPathsToLocales = {}
         for (const loc of this.#locales) {
-            this.sharedState.poFilesByLoc[loc] = {
-                catalog: {},
-                pluralRule: defaultPluralRule,
-                headers: {},
-                loaded: false,
-            }
             this.#catalogsFname[loc] = this.catalogFileName(loc)
             // for handleHotUpdate
             this.catalogPathsToLocales[this.#catalogsFname[loc]] = loc
             if (loc !== this.#config.sourceLocale) {
-                this.#geminiQueue[loc] = new GeminiQueue(
+                this.#geminiQueue[loc] = new AIQueue(
                     sourceLocaleName,
                     getLanguageName(loc),
-                    this.#config.geminiAPIKey,
+                    this.#config.ai,
                     async () => await this.savePoAndCompile(loc),
+                    this.#log,
                 )
+            }
+            if (this.sharedState.ownerKey === this.key) {
+                this.sharedState.poFilesByLoc[loc] = {
+                    catalog: {},
+                    pluralRule: defaultPluralRule,
+                    headers: {},
+                }
+                this.sharedState.extractedUrls[loc] = {}
             }
             await this.loadCatalogNCompile(loc)
         }
-        await this.writeProxy()
+        await this.writeProxies()
+        await this.initUrlPatterns()
+        if (this.#mode === 'build') {
+            await this.directScanFS(false, false)
+        }
     }
 
-    loadCatalogNCompile = async (loc: string): Promise<void> => {
-        try {
-            this.sharedState.poFilesByLoc[loc] = await loadCatalogFromPO(this.#catalogsFname[loc])
-            this.compile(loc)
-        } catch (err) {
-            if (err.code !== 'ENOENT') {
-                throw err
-            }
-            this.#log.log(`${color.magenta(this.key)}: Catalog not found for ${color.cyan(loc)}`)
+    urlPatternToTranslate = (pattern: string) => {
+        const {keys} = pathToRegexp(pattern)
+        const compile = compileUrlPattern(pattern, {encode: false})
+        const paramsReplace = {}
+        for (const [i, {name}] of keys.entries()) {
+            paramsReplace[name] = `{${i}}`
         }
+        return compile(paramsReplace)
+    }
+
+    initUrlPatterns = async () => {
+        for (const loc of this.#locales) {
+            const catalog = this.sharedState.poFilesByLoc[loc].catalog
+            const urlPatterns = this.#adapter.url?.patterns ?? []
+            const urlPatternsForTranslate = urlPatterns.map(this.urlPatternToTranslate)
+            const urlPatternMsgs = urlPatterns.map((patt, i) => {
+                const locPattern = urlPatternsForTranslate[i]
+                let context = null
+                if (locPattern !== patt) {
+                    context = `original: ${patt}`
+                }
+                return new Message(locPattern, null, context)
+            })
+            const urlPatternCatKeys = urlPatternMsgs.map(msg => msg.toKey())
+            for (const [key, item] of Object.entries(catalog)) {
+                if (!item.flags[urlPatternFlag]) {
+                    continue
+                }
+                if (!urlPatternCatKeys.includes(key)) {
+                    item.references = item.references.filter(r => r !== this.key)
+                    if (item.references.length === 0) {
+                        item.obsolete = true
+                    }
+                }
+            }
+            const untranslated: ItemType[] = []
+            let needWriteCatalog = false
+            for (const [i, locPattern] of urlPatternsForTranslate.entries()) {
+                const key = urlPatternCatKeys[i]
+                this.#urlPatternKeys[urlPatterns[i]] = key // save for href translate
+                if (locPattern.search(/\p{L}/u) === -1) {
+                    continue
+                }
+                let item = catalog[key]
+                if (!item || !item.flags[urlPatternFlag]) {
+                    item = new PO.Item()
+                    needWriteCatalog = true
+                }
+                item.msgid = locPattern
+                if (loc === this.#config.sourceLocale) {
+                    item.msgstr = [locPattern]
+                }
+                if (!item.references.includes(this.key)) {
+                    item.references.push(this.key)
+                    item.references.sort()
+                    needWriteCatalog = true
+                }
+                item.msgctxt = urlPatternMsgs[i].context
+                item.flags[urlPatternFlag] = true
+                item.obsolete = false
+                catalog[key] = item
+                if (!item.msgstr[0]) {
+                    untranslated.push(item)
+                }
+            }
+            if (untranslated.length && loc !== this.#config.sourceLocale) {
+                this.#geminiQueue[loc].add(untranslated)
+                await this.#geminiQueue[loc].running
+            }
+            if (needWriteCatalog) {
+                await this.savePoAndCompile(loc)
+            }
+        }
+        await this.writeUrlFiles()
+    }
+
+    loadCatalogNCompile = async (loc: string) => {
+        if (this.sharedState.ownerKey === this.key) {
+            try {
+                this.sharedState.poFilesByLoc[loc] = await loadCatalogFromPO(this.#catalogsFname[loc])
+            } catch (err) {
+                if (err.code !== 'ENOENT') {
+                    throw err
+                }
+                this.#log.warn(`${color.magenta(this.key)}: Catalog not found for ${color.cyan(loc)}`)
+            }
+        }
+        await this.compile(loc)
     }
 
     loadCatalogModule = (locale: string, loadID: string, hmrVersion = -1) => {
@@ -350,7 +567,9 @@ export class AdapterHandler {
         }
         return `
             ${module}
+            // only during dev, for HMR
             let latestVersion = ${hmrVersion}
+            // @ts-ignore
             export function update({ version, data }) {
                 if (latestVersion >= version) {
                     return
@@ -363,33 +582,83 @@ export class AdapterHandler {
         `
     }
 
-    #getGranularState(filename: string): GranularState {
+    async #getGranularState(filename: string): Promise<GranularState> {
         let state = this.granularStateByFile[filename]
         if (state == null) {
             const id = this.#adapter.generateLoadID(filename)
             if (id in this.granularStateByID) {
                 state = this.granularStateByID[id]
             } else {
+                let compiledLoaded: {[loc: string]: Compiled} = {}
                 state = {
                     id,
-                    compiled: Object.fromEntries(this.#locales.map(loc => [loc, {
-                        hasPlurals: false,
-                        items: []
-                    }])),
+                    compiled: Object.fromEntries(this.#locales.map(loc => {
+                        return [loc, compiledLoaded[loc] ?? {
+                            hasPlurals: false,
+                            items: [],
+                        }]
+                    })),
                     indexTracker: new IndexTracker(),
                 }
                 this.granularStateByID[id] = state
+                await this.writeProxies()
             }
             this.granularStateByFile[filename] = this.granularStateByID[id]
         }
         return state
     }
 
+    matchUrl = (url: string) => {
+        for (const pattern of this.#adapter.url?.patterns ?? []) {
+            if (matchUrlPattern(pattern, {decode: false})(url)) {
+                return pattern
+            }
+        }
+        return null
+    }
+
+    getUrlToCompile = (key: string, locale: string) => {
+        // e.g. key: /items/foo/{0}
+        const catalog = this.sharedState.poFilesByLoc[locale].catalog
+        let toCompile = key
+        const relevantPattern = this.matchUrl(key)
+        if (relevantPattern == null) {
+            return toCompile
+        }
+        // e.g. relevantPattern: /items/:rest
+        const patternItem = catalog[this.#urlPatternKeys[relevantPattern]]
+        if (patternItem) {
+            // e.g. patternItem.msgid: /items/{0}
+            const matchedUrl = matchUrlPattern(relevantPattern, {decode: false})(key)
+            // e.g. matchUrl.params: {rest: 'foo/{0}'}
+            if (matchedUrl) {
+                const translatedPattern = patternItem.msgstr[0] || patternItem.msgid
+                // e.g. translatedPattern: /elementos/{0}
+                const {keys} = pathToRegexp(relevantPattern)
+                const translatedPattUrl = this.urlPatternFromTranslate(translatedPattern, keys)
+                // e.g. translatedPattUrl: /elementos/:rest
+                const compileTranslated = compileUrlPattern(translatedPattUrl, {encode: false})
+                toCompile = compileTranslated(matchedUrl.params)
+                // e.g. toCompile: /elementos/foo/{0}
+            }
+        }
+        if (this.localizeUrl) {
+            toCompile = this.localizeUrl(toCompile || key, locale)
+        }
+        return toCompile
+    }
+
     compile = async (loc: string) => {
-        this.sharedState.compiled[loc] = { hasPlurals: false, items: [] }
+        this.sharedState.compiled[loc] ??= { hasPlurals: false, items: [] }
         const catalog = this.sharedState.poFilesByLoc[loc].catalog
-        for (const key in catalog) {
-            const poItem = catalog[key]
+        for (const [key, poItem] of Object.entries({...catalog, ...this.sharedState.extractedUrls[loc]})) {
+            if (poItem.flags[urlPatternFlag]) { // useless in compiled catalog
+                continue
+            }
+            // compile only if it came from a file under this adapter
+            if (!poItem.references.some(f => this.fileMatches(f))) {
+                continue
+            }
             const index = this.sharedState.indexTracker.get(key)
             let compiled: CompiledElement
             const fallback = this.sharedState.compiled[this.#config.sourceLocale]?.items?.[index] // ?. for sourceLocale itself
@@ -401,14 +670,18 @@ export class AdapterHandler {
                     compiled = fallback
                 }
             } else {
-                compiled = compileTranslation(poItem.msgstr[0], fallback)
+                let toCompile = poItem.msgstr[0]
+                if (poItem.flags[urlExtractedFlag]) {
+                    toCompile = this.getUrlToCompile(key, loc)
+                }
+                compiled = compileTranslation(toCompile, fallback)
             }
             this.sharedState.compiled[loc].items[index] = compiled
             if (!this.#adapter.granularLoad) {
                 continue
             }
             for (const fname of poItem.references) {
-                const state = this.#getGranularState(fname)
+                const state = await this.#getGranularState(fname)
                 state.compiled[loc].hasPlurals = this.sharedState.compiled[loc].hasPlurals
                 state.compiled[loc].items[state.indexTracker.get(key)] = compiled
             }
@@ -417,30 +690,25 @@ export class AdapterHandler {
     }
 
     writeCompiled = async (loc: string) => {
-        if (!this.#adapter.writeFiles.compiled) {
-            return
-        }
-        await writeFile(this.#getCompiledFilePath(loc, null), this.loadCatalogModule(loc, null))
+        await writeFile(this.getCompiledFilePath(loc, null), this.loadCatalogModule(loc, null))
         if (!this.#adapter.granularLoad) {
             return
         }
         for (const state of Object.values(this.granularStateByID)) {
-            await writeFile(this.#getCompiledFilePath(loc, state.id), this.loadCatalogModule(loc, state.id))
+            await writeFile(this.getCompiledFilePath(loc, state.id), this.loadCatalogModule(loc, state.id))
         }
     }
 
-    writeProxy = async () => {
-        if (!this.#adapter.writeFiles.proxy) {
-            return
-        }
-        await writeFile(this.proxyPath, this.getProxySync(this.proxyPath))
+    writeProxies = async () => {
+        await writeFile(this.proxyPath, this.getProxy())
+        await writeFile(this.proxySyncPath, this.getProxySync())
     }
 
     writeTransformed = async (filename: string, content: string) => {
-        if (!this.#adapter.writeFiles.transformed) {
+        if (!this.#adapter.outDir) {
             return
         }
-        const fname = resolve(this.outDir + '/' + filename)
+        const fname = resolve(this.#adapter.outDir + '/' + filename)
         await mkdir(dirname(fname), { recursive: true })
         await writeFile(fname, content)
     }
@@ -448,17 +716,9 @@ export class AdapterHandler {
     globConfToArgs = (conf: GlobConf): [string[], { ignore: string[] }] => {
         let patterns: string[] = []
         // ignore generated files
-        const options = { ignore: [this.loaderPath] }
-        if (this.#adapter.writeFiles.proxy) {
-            options.ignore.push(this.proxyPath)
-        }
-        if (this.#adapter.writeFiles.outDir) {
-            options.ignore.push(this.outDir + '*')
-        }
-        if (this.#adapter.writeFiles.compiled) {
-            for (const loc of this.#locales) {
-                options.ignore.push(this.compiledHead[loc] + '*')
-            }
+        const options = { ignore: [ this.#adapter.localesDir ] }
+        if (this.#adapter.outDir) {
+            options.ignore.push(this.#adapter.outDir)
         }
         if (typeof conf === 'string') {
             patterns = [conf]
@@ -479,7 +739,7 @@ export class AdapterHandler {
         return [patterns, options]
     }
 
-    savePoAndCompile = async (loc: string) => {
+    savePO = async (loc: string) => {
         const poFile = this.sharedState.poFilesByLoc[loc]
         const fullHead = { ...poFile.headers ?? {} }
         const updateHeaders = [
@@ -491,13 +751,14 @@ export class AdapterHandler {
             ['MIME-Version', '1.0'],
             ['Content-Type', 'text/plain; charset=utf-8'],
             ['Content-Transfer-Encoding', '8bit'],
-            ['PO-Revision-Date', new Date().toISOString()],
         ]
         for (const [key, val] of updateHeaders) {
             fullHead[key] = val
         }
+        const now = new Date().toISOString()
         const defaultHeaders = [
-            ['POT-Creation-Date', new Date().toISOString()],
+            ['POT-Creation-Date', now],
+            ['PO-Revision-Date', now],
         ]
         for (const [key, val] of defaultHeaders) {
             if (!fullHead[key]) {
@@ -505,66 +766,219 @@ export class AdapterHandler {
             }
         }
         await saveCatalogToPO(poFile.catalog, this.#catalogsFname[loc], fullHead)
-        if (this.#mode !== 'extract') { // save for the end
-            await this.compile(loc)
-        }
     }
 
-    #prepareHeader = (filename: string, loadID: string, hasHmr: boolean): { head: string, expr: string } => {
-        let loaderRelTo = filename
-        if (this.#adapter.writeFiles.transformed) {
-            loaderRelTo = resolve(this.outDir + '/' + filename)
+    savePoAndCompile = async (loc: string) => {
+        this.onBeforeWritePO?.()
+        if (this.#mode === 'cli') { // save for the end
+            return
         }
-        let loaderPath = relative(dirname(loaderRelTo), this.loaderPath)
-        if (!loaderPath.startsWith('.')) {
-            loaderPath = `./${loaderPath}`
-        }
-        const getFuncName = '_w_load_'
-        let head = `import ${runtimeVars.rtWrap} from 'wuchale/runtime'\n`
-        if (hasHmr) {
-            const getFuncHmr = `_w_load_hmr_`
-            const catalogVar = '_w_catalog_'
-            head += `
-                import ${getFuncHmr} from "${loaderPath}"
-                function ${getFuncName}(loadID) {
-                    const ${catalogVar} = ${getFuncHmr}(loadID)
-                    ${catalogVar}?.update?.(${runtimeVars.hmrUpdate})
-                    return ${catalogVar}
-                }
-            `
-        } else {
-            head += `import ${getFuncName} from "${loaderPath}"`
-        }
-        if (!this.#adapter.bundleLoad) {
-            return {
-                head,
-                expr: `${getFuncName}('${loadID}')`,
+        await this.savePO(loc)
+        await this.compile(loc)
+    }
+
+    #hmrUpdateFunc = (getFuncName: string, getFuncNameHmr: string) => {
+        const rtVar = '_w_rt_'
+        return `
+            function ${getFuncName}(loadID) {
+                const ${rtVar} = ${getFuncNameHmr}(loadID)
+                ${rtVar}?._?.update?.(${varNames.hmrUpdate})
+                return ${rtVar}
             }
+        `
+    }
+
+    #getRuntimeVars = (): CatalogExpr => ({
+        plain: this.#adapter.getRuntimeVars?.plain ?? getFuncPlainDefault,
+        reactive: this.#adapter.getRuntimeVars?.reactive ?? getFuncReactiveDefault,
+    })
+
+    #prepareHeader = (filename: string, loadID: string, hmrData: HMRData, forServer: boolean): string => {
+        let head = []
+        const getRuntimeVars = this.#getRuntimeVars()
+        let getRuntimePlain = getRuntimeVars.plain
+        let getRuntimeReactive = getRuntimeVars.reactive
+        if (hmrData != null) {
+            head.push(`const ${varNames.hmrUpdate} = ${JSON.stringify(hmrData)}`)
+            getRuntimePlain += 'hmr_'
+            getRuntimeReactive += 'hmr_'
+            head.push(
+                this.#hmrUpdateFunc(getRuntimeVars.plain, getRuntimePlain),
+                this.#hmrUpdateFunc(getRuntimeVars.reactive, getRuntimeReactive),
+            )
+        }
+        let loaderRelTo = filename
+        if (this.#adapter.outDir) {
+            loaderRelTo = resolve(this.#adapter.outDir + '/' + filename)
+        }
+        const loaderPath = this.#getImportPath(forServer ? this.loaderPath.server : this.loaderPath.client, loaderRelTo)
+        const importsFuncs = [
+            `${loaderImportGetRuntime} as ${getRuntimePlain}`,
+            `${loaderImportGetRuntimeRx} as ${getRuntimeReactive}`,
+        ]
+        head = [
+            `import {${importsFuncs.join(', ')}} from "${loaderPath}"`,
+            ...head,
+        ]
+        if (!this.#adapter.bundleLoad) {
+            return head.join('\n')
         }
         const imports = []
         const objElms = []
         for (const [i, loc] of this.#locales.entries()) {
             const locKW = `_w_c_${i}_`
-            imports.push(`import * as ${locKW} from '${this.virtModEvent(loc, loadID)}'`)
+            const importFrom = this.#getImportPath(this.getCompiledFilePath(loc, loadID), loaderRelTo)
+            imports.push(`import * as ${locKW} from '${importFrom}'`)
             objElms.push(`${objKeyLocale(loc)}: ${locKW}`)
         }
-        const catalogsVarName = '_w_catalogs_'
+        return [
+            ...imports,
+            ...head,
+            `const ${bundleCatalogsVarName} = {${objElms.join(',')}}`
+        ].join('\n')
+    }
+
+    #prepareRuntimeExpr = (loadID: string): CatalogExpr => {
+        const importLoaderVars = this.#getRuntimeVars()
+        if (this.#adapter.bundleLoad) {
+            return {
+                plain: `${importLoaderVars.plain}(${bundleCatalogsVarName})`,
+                reactive: `${importLoaderVars.reactive}(${bundleCatalogsVarName})`,
+            }
+        }
         return {
-            head: [
-                head,
-                ...imports,
-                `const ${catalogsVarName} = {${objElms.join(',')}}`
-            ].join('\n'),
-            expr: `${getFuncName}(${catalogsVarName})`,
+            plain: `${importLoaderVars.plain}('${loadID}')`,
+            reactive: `${importLoaderVars.reactive}('${loadID}')`,
         }
     }
 
-    transform = async (content: string, filename: string, hmrVersion = -1): Promise<{ code?: string, map?: any }> => {
+    handleMessages = async (loc: string, msgs: Message[], filename: string): Promise<string[]> => {
+        const poFile = this.sharedState.poFilesByLoc[loc]
+        const extractedUrls = this.sharedState.extractedUrls[loc]
+        const previousReferences: Record<string, {count: number, indices: number[]}> = {}
+        for (const item of Object.values(poFile.catalog)) {
+            if (!item.references.includes(filename)) {
+                continue
+            }
+            const key = new Message([item.msgid, item.msgid_plural], null, item.msgctxt).toKey()
+            previousReferences[key] = {count: 0, indices: []}
+            for (const [i, ref] of item.references.entries()) {
+                if (ref !== filename) {
+                    continue
+                }
+                previousReferences[key].count++
+                previousReferences[key].indices.push(i)
+            }
+        }
+        let newItems: boolean = false
+        const hmrKeys = []
+        const untranslated: ItemType[] = []
+        let newRefs = false
+        let newUrlRefs = false
+        let commentsChanged = false
+        for (const msgInfo of msgs) {
+            const key = msgInfo.toKey()
+            hmrKeys.push(key)
+            const collection = msgInfo.type === 'url' ? extractedUrls : poFile.catalog
+            let poItem = collection[key]
+            if (!poItem) {
+                // @ts-expect-error
+                poItem = new PO.Item({
+                    nplurals: poFile.pluralRule.nplurals,
+                })
+                poItem.msgid = msgInfo.msgStr[0]
+                if (msgInfo.plural) {
+                    poItem.msgid_plural = msgInfo.msgStr[1] ?? msgInfo.msgStr[0]
+                }
+                collection[key] = poItem
+                if (msgInfo.type !== 'url') {
+                    newItems = true
+                }
+            }
+            if (msgInfo.context) {
+                poItem.msgctxt = msgInfo.context
+            }
+            const newComments = msgInfo.comments.map(c => c.replace(/\s+/g, ' ').trim())
+            let iStartComm: number
+            if (key in previousReferences) {
+                const prevRef = previousReferences[key]
+                iStartComm = prevRef.indices.shift() * newComments.length // cannot be pop for determinism
+                const prevComments = poItem.extractedComments.slice(iStartComm, iStartComm + newComments.length)
+                if (prevComments.length !== newComments.length || prevComments.some((c, i) => c !== newComments[i])) {
+                    commentsChanged = true
+                }
+                if (prevRef.indices.length === 0) {
+                    delete previousReferences[key]
+                }
+            } else {
+                poItem.references.push(filename)
+                poItem.references.sort() // make deterministic
+                iStartComm = poItem.references.lastIndexOf(filename) * newComments.length
+                if (msgInfo.type === 'message') {
+                    newRefs = true // now it references it
+                } else {
+                    newUrlRefs = true // no write needed but just compile
+                }
+            }
+            if (newComments.length) {
+                poItem.extractedComments.splice(iStartComm, newComments.length, ...newComments)
+            }
+            poItem.obsolete = false
+            if (msgInfo.type === 'url') {
+                poItem.flags[urlExtractedFlag] = true // included in compiled, but not written to po file
+                continue
+            }
+            if (loc === this.#config.sourceLocale) {
+                const msgStr = msgInfo.msgStr.join('\n')
+                if (poItem.msgstr.join('\n') !== msgStr) {
+                    poItem.msgstr = msgInfo.msgStr
+                    untranslated.push(poItem)
+                }
+            } else if (!poItem.msgstr[0]) {
+                untranslated.push(poItem)
+            }
+        }
+        const removedRefs = Object.entries(previousReferences)
+        for (const [key, info] of removedRefs) {
+            const item = poFile.catalog[key]
+            const commentPerRef = Math.floor(item.extractedComments.length / item.references.length)
+            for (const index of info.indices) {
+                item.references.splice(index, 1)
+                item.extractedComments.splice(index * commentPerRef, commentPerRef)
+            }
+            if (item.references.length === 0) {
+                item.obsolete = true
+            }
+        }
+        if (newUrlRefs) {
+            await this.compile(loc)
+        }
+        if (untranslated.length === 0) {
+            if (newRefs || removedRefs.length || commentsChanged) {
+                await this.savePoAndCompile(loc)
+            }
+            return hmrKeys
+        }
+        if (loc === this.#config.sourceLocale || !this.#geminiQueue[loc]?.ai) {
+            if (newItems || newRefs || commentsChanged) {
+                await this.savePoAndCompile(loc)
+            }
+            return hmrKeys
+        }
+        this.#geminiQueue[loc].add(untranslated)
+        await this.#geminiQueue[loc].running
+        return hmrKeys
+    }
+
+    transform = async (content: string, filename: string, hmrVersion = -1, forServer = false, direct = false): Promise<TransformOutputCode> => {
+        if (platform === 'win32') {
+            filename = filename.replaceAll('\\', '/')
+        }
         let indexTracker = this.sharedState.indexTracker
         let loadID = this.key
         let compiled = this.sharedState.compiled
         if (this.#adapter.granularLoad) {
-            const state = this.#getGranularState(filename)
+            const state = await this.#getGranularState(filename)
             indexTracker = state.indexTracker
             loadID = state.id
             compiled = state.compiled
@@ -573,110 +987,96 @@ export class AdapterHandler {
             content,
             filename,
             index: indexTracker,
-            header: this.#prepareHeader(filename, loadID, hmrVersion >= 0),
+            expr: this.#prepareRuntimeExpr(loadID),
+            matchUrl: this.matchUrl,
         })
-        const hmrKeys: Record<string, string[]> = {}
-        for (const loc of this.#locales) {
-            // clear references to this file first
-            let previousReferences: Record<string, number> = {}
-            let fewerRefs = false
-            const poFile = this.sharedState.poFilesByLoc[loc]
-            for (const item of Object.values(poFile.catalog)) {
-                if (!item.references.includes(filename)) {
-                    continue
-                }
-                const key = new Message([item.msgid, item.msgid_plural], null, item.msgctxt).toKey()
-                const prevRefs = item.references.length
-                item.references = item.references.filter(f => f !== filename)
-                previousReferences[key] = prevRefs - item.references.length
-                item.obsolete = item.references.length === 0
-                fewerRefs = true
-            }
-            if (!msgs.length) {
-                if (fewerRefs) {
-                    this.savePoAndCompile(loc)
-                }
-                continue
-            }
-            let newItems: boolean = false
-            hmrKeys[loc] = []
-            const untranslated: ItemType[] = []
-            let newRefs = false
-            for (const msgInfo of msgs) {
-                let key = msgInfo.toKey()
-                hmrKeys[loc].push(key)
-                let poItem = poFile.catalog[key]
-                if (!poItem) {
-                    // @ts-expect-error
-                    poItem = new PO.Item({
-                        nplurals: poFile.pluralRule.nplurals,
-                    })
-                    poItem.msgid = msgInfo.msgStr[0]
-                    if (msgInfo.plural) {
-                        poItem.msgid_plural = msgInfo.msgStr[1] ?? msgInfo.msgStr[0]
-                    }
-                    poFile.catalog[key] = poItem
-                    newItems = true
-                }
-                if (msgInfo.context) {
-                    poItem.msgctxt = msgInfo.context
-                }
-                if (previousReferences[key] > 0) {
-                    if (previousReferences[key] === 1) {
-                        delete previousReferences[key]
-                    } else {
-                        previousReferences[key]--
+        let hmrData: HMRData = null
+        if (this.#mode !== 'build' || direct) {
+            if (this.#log.checkLevel('verbose')) {
+                if (msgs.length) {
+                    this.#log.verbose(`${this.key}: ${msgs.length} messages from ${filename}:`)
+                    for (const msg of msgs) {
+                        this.#log.verbose(`  ${msg.msgStr.join(', ')} [${msg.details.scope}]`)
                     }
                 } else {
-                    newRefs = true // now it references it
-                }
-                if (!poItem.references.includes(filename)) {
-                    poItem.references.push(filename)
-                    poItem.references.sort()
-                }
-                poItem.obsolete = false
-                if (loc === this.#config.sourceLocale) {
-                    const msgStr = msgInfo.msgStr.join('\n')
-                    if (poItem.msgstr.join('\n') !== msgStr) {
-                        poItem.msgstr = msgInfo.msgStr
-                        untranslated.push(poItem)
-                    }
-                } else if (!poItem.msgstr[0]) {
-                    untranslated.push(poItem)
+                    this.#log.verbose(`${this.key}: No messages from ${filename}.`)
                 }
             }
-            if (untranslated.length === 0) {
-                if (newRefs || Object.keys(previousReferences).length) { // or unused refs
-                    await this.savePoAndCompile(loc)
-                }
-                continue
-            }
-            if (loc === this.#config.sourceLocale || !this.#geminiQueue[loc]?.url) {
-                if (newItems || newRefs) {
-                    await this.savePoAndCompile(loc)
-                }
-                continue
-            }
-            const newRequest = this.#geminiQueue[loc].add(untranslated)
-            const opType = `(${newRequest ? color.yellow('new request') : color.green('add to request')})`
-            this.#log.log(`Gemini translate ${color.cyan(untranslated.length)} items to ${color.cyan(getLanguageName(loc))} ${opType}`)
-            await this.#geminiQueue[loc].running
-        }
-        let hmrData: HMRData = null
-        if (hmrVersion >= 0) {
-            hmrData = { version: hmrVersion, data: {} }
+            const hmrKeys: Record<string, string[]> = {}
             for (const loc of this.#locales) {
-                hmrData.data[loc] = hmrKeys[loc]?.map(key => {
-                    const index = indexTracker.get(key)
-                    return [ index, compiled[loc].items[index] ]
-                })
+                hmrKeys[loc] = await this.handleMessages(loc, msgs, filename)
+            }
+            if (msgs.length && hmrVersion >= 0) {
+                hmrData = { version: hmrVersion, data: {} }
+                for (const loc of this.#locales) {
+                    hmrData.data[loc] = hmrKeys[loc]?.map(key => {
+                        const index = indexTracker.get(key)
+                        return [ index, compiled[loc].items[index] ]
+                    })
+                }
             }
         }
-        const output = result.output(hmrData)
-        await this.writeTransformed(filename, output.code ?? content)
-        if (!msgs.length) {
-            return {}
+        let output: TransformOutputCode = {}
+        if (msgs.length) {
+            output = result.output(this.#prepareHeader(filename, loadID, hmrData, forServer))
         }
+        await this.writeTransformed(filename, output.code ?? content)
         return output
     }
+
+    directFileHandler() {
+        const adapterName = color.magenta(this.key)
+        return async (filename: string) => {
+            console.info(`${adapterName}: Extract from ${color.cyan(filename)}`)
+            const contents = await readFile(filename)
+            await this.transform(contents.toString(), filename, undefined, undefined, true)
+        }
+    }
+
+    async directScanFS(clean: boolean, sync: boolean) {
+        const dumps: Record<string, string> = {}
+        for (const loc of this.#locales) {
+            const items = Object.values(this.sharedState.poFilesByLoc[loc].catalog)
+            dumps[loc] = poDumpToString(items)
+            if (clean) {
+                for (const item of items) {
+                    // unreference all references that belong to this adapter
+                    if (item.flags[urlPatternFlag]) {
+                        item.references = item.references.filter(ref => ref !== this.key)
+                    } else {
+                        // don't touch other adapters' files. related extracted comments handled by handler
+                        item.references = item.references.filter(ref => !this.fileMatches(ref))
+                    }
+                }
+            }
+            await this.initUrlPatterns()
+        }
+        const filePaths = await glob(...this.globConfToArgs(this.#adapter.files))
+        const extract = this.directFileHandler()
+        if (sync) {
+            for (const fPath of filePaths) {
+                await extract(fPath)
+            }
+        } else {
+            await Promise.all(filePaths.map(extract))
+        }
+        if (clean) {
+            console.info('Cleaning...')
+        }
+        for (const loc of this.#locales) {
+            if (clean) {
+                const catalog = this.sharedState.poFilesByLoc[loc].catalog
+                for (const [key, item] of Object.entries(catalog)) {
+                    if (item.references.length === 0) {
+                        delete catalog[key]
+                    }
+                }
+            }
+            const newDump = poDumpToString(Object.values(this.sharedState.poFilesByLoc[loc].catalog))
+            if (newDump !== dumps[loc]) {
+                await this.savePO(loc)
+            }
+        }
+    }
+
 }

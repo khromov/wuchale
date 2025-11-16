@@ -1,11 +1,10 @@
-// This is just the default loader.
-// You can customize it however you want, it will not be overwritten once it exists and is not empty.
+import { useState, useEffect, useMemo } from 'react'
+import toRuntime from 'wuchale/runtime'
+import { locales } from '${DATA}'
 
-/// <reference types="wuchale/virtual" />
+let locale = locales[0]
 
-import { useState, useEffect } from 'react'
-
-const callbacks = new Set()
+const callbacks = new Set([(/** @type {string} */ loc) => {locale = loc}])
 
 /**
  * @param {string} locale
@@ -16,10 +15,15 @@ export function setLocale(locale) {
     }
 }
 
-export default (/** @type {{[locale: string]: import('wuchale/runtime').CatalogModule }} */ catalogs) => {
-    const [locale, setLocale] = useState('en')
+export const getRuntimeRx = (/** @type {{[locale: string]: import('wuchale/runtime').CatalogModule }} */ catalogs) => {
+    const [locale, setLocale] = useState(locales[0])
     useEffect(() => {
-        callbacks.add((/** @type {string} */ locale) => setLocale(locale))
-    })
-    return catalogs[locale]
+        const cb = (/** @type {string} */ locale) => setLocale(locale)
+        callbacks.add(cb)
+        return () => callbacks.delete(cb)
+    }, [catalogs])
+    return useMemo(() => toRuntime(catalogs[locale], locale), [locale, catalogs])
 }
+
+// non-reactive
+export const getRuntime = (/** @type {{[locale: string]: import('wuchale/runtime').CatalogModule }} */ catalogs) => toRuntime(catalogs[locale], locale)

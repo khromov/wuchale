@@ -6,7 +6,7 @@
 <br/>
 <p align="center">
   <a href="https://npmjs.com/package/wuchale"><img src="https://img.shields.io/npm/v/wuchale?logo=npm&logoColor=red&color=blue" alt="npm package"></a>
-  <a href="https://github.com/wuchalejs/wuchale/actions/workflows/node.js.yml"><img src="https://github.com/K1DV5/wuchale/actions/workflows/node.js.yml/badge.svg?branch=main" alt="build status"></a>
+  <a href="https://github.com/wuchalejs/wuchale/actions/workflows/ci.yml"><img src="https://github.com/K1DV5/wuchale/actions/workflows/ci.yml/badge.svg?branch=main" alt="build status"></a>
   <a href="https://pr.new/wuchalejs/wuchale"><img src="https://developer.stackblitz.com/img/start_pr_dark_small.svg" alt="Start new PR in StackBlitz Codeflow"></a>
   <a href="https://discord.gg/ypVSZTbzvG"><img src="https://img.shields.io/badge/chat-discord-blue?style=flat&logo=discord" alt="discord chat"></a>
 </p>
@@ -14,14 +14,15 @@
 
 # 📜`wuchale`🪶
 
-**`wuchale`** is a compile-time internationalization (i18n) toolkit that
-requires zero code changes. Write your components naturally, and `wuchale`
-automatically extracts and replaces translatable strings at build time.
+**`wuchale`** (pronounced "wuh-cha-lay") is a compile-time internationalization
+(i18n) toolkit that requires zero code changes. Write your components
+naturally, and `wuchale` automatically extracts and replaces translatable
+strings at build time.
 
 - **✨ No extra syntax!** - Your normal code is enough
 - **📦 Tiny catalogs to bundle** - Text catalogs are just arrays, no keys necessary, like Protobuf
 - **🔌 Zero-effort integration** - Add i18n to existing projects without rewriting code
-- **🤖 Optional AI translation** - Gemini integration for automatic on-the-fly translations
+- **🤖 Optional AI translation** - Configurable integration for automatic on-the-fly translations
 - **⚡ Full, granular HMR support** - Live updates during development, including AI auto-translation
 - **📦 Tiny footprint** - Very few (less than 5) additional dependencies, no bloated `node_modules`
 - **🧠 Smart extraction** - Uses AST analysis to handle nested markup, conditionals, loops, and complex interpolations
@@ -102,6 +103,7 @@ Your original code stays clean and readable, while the build output is automatic
 - **Nested markup**: `<p>Visit our <a href="/help">help page</a> for more info</p>`
 - **Conditional content**: Handles dynamic content in templates
 - **Loop structures**: Automatic extraction from repeated elements
+- **URLs**: E.g. `/about` to `/de/uber-uns`
 - **Hot Module Replacement**: Live translation updates during development
 
 ## Repository structure
@@ -154,15 +156,20 @@ fast.
 Contributions are welcome! Please check out our test suites located inside each
 package for examples of supported scenarios.
 
-## ❤️ Support & Acknowledgments
+## ❤️ Sponsors
 
-> Thank you **[@hayzamjs](https://github.com/hayzamjs)** for making a donation
-and using it in [Sylve](https://github.com/AlchemillaHQ/Sylve), and giving
-valuable feedback!
+This project is supported by the community. Become a sponsor and get your name
+or logo listed here!
 
-If you find `wuchale` valuable and you enjoy working with it, supporting it on
-[Github Sponsors](https://github.com/sponsors/K1DV5) or [Open
-Collective](https://opencollective.com/wuchale) would mean a lot.
+[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor%20on-GitHub-%23ea4aaa?logo=github&logoColor=white)](https://github.com/sponsors/K1DV5)
+[![Donate on Open Collective](https://img.shields.io/badge/Donate%20on-Open%20Collective-%230092e6?logo=opencollective&logoColor=white)](https://opencollective.com/wuchale)
+
+Special thanks to our supporters:
+
+[![hayzamjs](https://avatars.githubusercontent.com/u/3922884?v=4&size=48)](https://github.com/hayzamjs)
+[![perdix](https://avatars.githubusercontent.com/u/1526654?v=4&size=48)](https://github.com/perdix)
+
+And one private donor 🙏.
 
 ## Inspiration
 
@@ -170,8 +177,8 @@ This project was inspired by [Lingui](https://lingui.dev/) especially some of
 its workflow. If you've used Lingui before, you'll find familiar concepts like
 extraction and compilation.
 
-`wuchale` takes a different approach: you don't need to change your code,
-catalogs compile smaller than any other tool (including Lingui's), and it
+Where `wuchale` differs, among other things, is that you don't need to change your
+code, catalogs compile smaller than any other tool (including Lingui's), and it
 integrates with a wider range of frameworks.
 
 ## License

@@ -1,6 +1,6 @@
 {
     "name": "@wuchale/vite-plugin",
-    "version": "0.13.2",
+    "version": "0.15.3",
     "description": "Protobuf-like i18n from plain code: Vite plugin",
     "scripts": {
         "dev": "tsc --watch",
@@ -40,10 +40,10 @@
     "author": "K1DV5",
     "license": "MIT",
     "dependencies": {
-        "wuchale": "^0.14.2"
+        "wuchale": "^0.18.3"
     },
     "devDependencies": {
-        "typescript": "^5.8.3"
+        "typescript": "^5.9.3"
     },
     "type": "module"
 }

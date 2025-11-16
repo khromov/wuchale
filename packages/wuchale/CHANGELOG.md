@@ -1,5 +1,466 @@
 # wuchale
 
+## 0.18.5
+
+### Patch Changes
+
+- 44a6d24: Fix `... as type` and `<type>...` expressions in TS not visited sometimes
+- f861f78: Use proper hook name to get reactive runtime in React #181
+
+## 0.18.4
+
+### Patch Changes
+
+- ff87ab3: Don't update PO-Revision-Date header on extract, should be set by translation tool/platform
+
+## 0.18.3
+
+### Patch Changes
+
+- a1a31f9: Fix errors during build due to granular load IDs and TS types
+
+## 0.18.2
+
+### Patch Changes
+
+- 4a8ba3d: Fix runtime initialization sometimes after early exits in functions
+
+  Causing errors in React apps
+
+- db45dff: Fix default loader templates, remove obsolete comments
+- 5b0a570: Fix `custom` loader in config causing errors
+
+## 0.18.1
+
+### Patch Changes
+
+- 978aaa4: Fix compiled catalogs not written on build
+
+## 0.18.0
+
+### Minor Changes
+
+- 37deb80: Always use physical files, change `catalog` config to `localesDir`
+
+  Previusly virtual modules offered by Vite made it possible to keep the file system
+  clean and a slight performance advantage when building, but they had disadvantages:
+
+  - Inspecting what Wuchale generates was not possible unless the `writeFiles` config was enabled
+  - They don't work outside of Vite
+  - Supporting physical files was therefore unavoidable and that meant supporting two different systems to export the same things
+
+  Now everything is written to disk, including proxies, compiled catalogs, and
+  locales data too. And `writeFiles` has been removed. In cases where writing the
+  transformed code is desired, the destination can be provided to the `outDir` adapter
+  config.
+
+  The second thing is that the location of the catalog files was previusly
+  specified using the `catalog` adapter config, which accepted a substitution
+  parameter, `{locale}` but it's an unnecessary complexity that can lead to
+  problems, and it's not just catalogs that's stored in that location. Therefore,
+  it has been replaced by the self descriptive config, `localesDir`.
+
+- 37deb80: Improve base heuristic to avoid ALLCAPS like POST and EUR, with no lowercase like "M 0,0" in script and attributes
+- 37deb80: Removed the `init` CLI command. Loaders are now specified in the config. And they have to export `getRuntime` and `getRuntimeRx`.
+
+  The interactive `init` command was mainly created to scaffold loaders. But
+  since most devs don't touch the loaders and since updates to what the loaders
+  are expected to export and their locations is not that straightforward to keep
+  up with the package updates, the command has been removed, and the loaders can
+  be specified in the adapter configuration using the key `loader`.
+
+  The loader config can take some default included loaders and additionally
+  `custom` as a value. For example, the Svelte adapter can accept the values
+  `svelte`, `sveltekit` and `custom`.
+
+  Specifying the included loaders (`svelte` or `sveltekit` in the example case)
+  means you don't want to control their content and want to use the default. And
+  so the loader(s) contents are (over)written at dev server startup or the
+  `extract` command. That way, they are automatically kept up to date with the
+  package. But if you want to do custom stuff with the loaders, and don't want
+  them to be overwritten, you can specify `custom`.
+
+  The location of the loaders is next to the catalogs, and follows this naming convention:
+
+  ```
+  {adapter key}.loader[.server].{loader extension}
+  ```
+
+  For example, for a SvelteKit project, it can be: `main.loader.svelte.js`
+  (client) and `main.loader.server.svelte.js` (server). Therefore, if you take
+  ownership of these files and do custom stuff, you can specify `custom` in the
+  adapter config.
+
+  And next, the (custom) loaders have to export functions `getRuntime` and
+  `getRuntimeRx` after wrapping the loaded catalogs with `toRuntime` from
+  `wuchale/runtime`.
+
+- 37deb80: Provide locale as an rgument option for patterns for easy l10n
+
+  You can now use pure functions for l10n like currency and date, etc.
+
+  For example, you can define the function:
+
+  ```js
+  function currency(num, loc = "en") {
+    return new Intl.NumberFormat(loc, {
+      style: "currency",
+      currency: "EUR",
+    }).format(num);
+  }
+  ```
+
+  And specify the pattern in the config:
+
+  ```js
+  // ...
+      adapters: {
+          main: svelte({
+              loader: 'sveltekit',
+              patterns: [
+                  {name: 'currency', args: ['other', 'locale']},
+              ]
+          }),
+  // ...
+  ```
+
+  And when you use it like normal:
+
+  ```svelte
+  <p>{currency(123456.789)}</p>
+  ```
+
+  It will produce localized variants based on the locale:
+
+  - `en`: `€123,456.79`
+  - `es`: `123.456,79 €`
+  - `fr`: `123 456,79 €`
+
+  You can use it with ANY l10n approach, you just have to specify the pattern.
+
+- 37deb80: Run a pre scan and compile catalogs before build to prevent race conditions
+
+  This solves the problem where you start the build process with some messages in
+  the code not yet extracted to the PO files, and are discovered during the build
+  process, which causes the PO file and subsequently the compiled catalogs to be
+  modified, during build. That causes a race condition and makes the build
+  process fail because of a syntax error (the compiled catalog is read while only
+  half of it is written.)
+
+  Additionally, with the new URL handling, links are not directly translated,
+  their translation is derived from the URL pattern translations. That removes
+  the need to store them in the PO files, just the patterns. But that also means
+  they are not known at the start of the build process, which causes the above
+  problem.
+
+  Now all extraction and compilation of messages is performed prior to the build,
+  during build, no PO file writes or compiles are performed, only code
+  transformations happen. This makes builds deterministic.
+
+- 9d1dff8: Add support for translating URL paths!
+
+  This is the biggest addition on this release. Internationalizing URL paths is now possible,
+  with the same conveniences of no/minimal code changes, while respecting the fact that URLs
+  are to be handled carefully.
+
+  There are two parts to this:
+
+  - Translation: e.g. `/about` to `/uber-uns`
+  - Localization: e.g. `/about` to `/en/about`
+
+  Full guide coming soon in the docs!
+
+## 0.17.5
+
+### Patch Changes
+
+- 5c8cea6: Fix chain expressions (JS) and render tags (Svelte) not being visited
+
+## 0.17.4
+
+### Patch Changes
+
+- a955579: Visit @const declarations in svelte, more compatibility
+
+## 0.17.3
+
+### Patch Changes
+
+- 280ad8d: Fix tagged template strings not extracted
+
+## 0.17.2
+
+### Patch Changes
+
+- 51778eb: Fix patterns not working for template literals
+
+## 0.17.1
+
+### Patch Changes
+
+- 6a9b651: Fix config with `files: {include: ..., ignore: ...}` not working, and improve verbose output
+- 8e2611d: Export and document all default heuristic functions
+
+## 0.17.0
+
+### Minor Changes
+
+- 5a221a2: Expose interface to make AI translator customizable
+
+  You can now use a custom translator model other than Gemini by supplying the info in the config:
+
+  ```js
+  export default {
+    //...
+    ai: {
+      name: "ChatGPT", // e.g.
+      batchSize: 50,
+      parallel: 10,
+      translate: (content, instruction) => {
+        // logic
+        return translatedContent;
+      },
+    },
+    //...
+  };
+  ```
+
+  Gemini is still the default, but now it's separated out and was made customizable:
+
+  ```js
+  import { gemini } from "wuchale";
+
+  export default {
+    //...
+    ai: gemini({
+      batchSize: 40,
+      parallel: 5,
+      think: true, // default: false
+    }),
+    //...
+  };
+  ```
+
+- 15cf377: Pass whole message to heuristic function, with context
+- 0b5c207: Svelte: auto wrap variable declarations by `$derived` as needed instead of requiring it in the code
+- 16b116c: Customizable log levels, add verbose level where all extracted messages are shown
+- 22198c1: Redesign status command output with tables
+- d531bcc: Add support for multiple custom patterns to support full l10n
+
+  For example, if you want to use [`Intl.MessageFormat`](https://formatjs.github.io/docs/intl-messageformat/) for everything it supports including plurals, you add a signature pattern for a utility function in the config:
+
+  ```js
+  // ...
+  adapters: js({
+    patterns: [
+      {
+        name: "formatMsg",
+        args: ["message", "other"],
+      },
+    ],
+  });
+  //...
+  ```
+
+  Then you create your reusable utility function with that name:
+
+  ```js
+  // where you get the locale
+  let locale = "en";
+
+  export function formatMsg(msg, args) {
+    return new IntlMessageFormat(msg, locale).format(args);
+  }
+  ```
+
+  And use it anywhere:
+
+  ```js
+  const msg = formatMsg(
+    `{numPhotos, plural,
+        =0 {You have no photos.}
+        =1 {You have one photo.}
+        other {You have # photos.}
+      }`,
+    { numPhotos: 1000 }
+  );
+  ```
+
+  Then wuchale will extract and transform it into:
+
+  ```js
+  const msg = formatMsg(_w_runtime_.t(0), { numPhotos: 1000 });
+  ```
+
+- 9f997c2: Add `--sync` flag for the CLI command to process files sequentially
+
+### Patch Changes
+
+- 6d0a4d3: Make `wuchale --clean` idempotent and write once at the end
+
+## 0.16.5
+
+### Patch Changes
+
+- 1d57789: Fix locales not separate when written to proxy
+
+## 0.16.4
+
+### Patch Changes
+
+- 5aa768a: Ignore form method attribute and fetch calls
+- 0352c60: Fix issues around arrow functions and function expressions
+
+  These are technically functions but their bodies are not block statement bodies, but expressions. For this reason, they were ignored when they are defined at the top level and when they are inside functions, they would use the runtime instance of their parent. Now their own bodies are tuned into block statement bodies:
+
+  ```js
+  const foo = () => "Hello";
+  ```
+
+  Now becomes:
+
+  ```js
+  const foo = () => {
+    const _w_runtime_ = _w_to_rt_(_w_load_("main"));
+    return _w_runtime_.t(0);
+  };
+  ```
+
+  This allows them to be defined at the top level and they should still get their contents properly extracted.
+
+- 04e28a3: Fix initialization outside `<script>` when the `<script>` is empty
+
+## 0.16.3
+
+### Patch Changes
+
+- 4210ee1: Fix error on empty body content when trying to get body start (e.g. in empty `<script>`)
+
+## 0.16.2
+
+### Patch Changes
+
+- f7c0225: Fix class declarations not visited
+
+## 0.16.1
+
+### Patch Changes
+
+- 973848b: Fix HMR having problems with lazy loaded files
+
+## 0.16.0
+
+### Minor Changes
+
+- fef0d11: Add the `@wc-ignore-file` comment directive
+
+  As an alternative to ignoring a file in the `files` config value, you can now
+  ignore a whole file by putting this directive at the beginning of the file,
+  before any extractable messages. The advantage is that it doesn't need a
+  restart of the dev server and if you rename/move the file it will always be
+  ignored.
+
+- 4fcf264: Add support for .mjs config as default
+- 46aa3f2: Export locales from proxy when `writeFiles` is enabled for server to not need tweaking the default loader
+- 37367ca: Add placeholder context comments into PO file
+- f07d484: Gemini: translate in batches of 50 max, auto retry with status messages
+
+  This is useful for one off translation, usually just after adding wuchale to a
+  big project. Gemini sometimes doesn't translate all messages when it's given
+  too many, so this update batches the messages into groups of ~50, and when not
+  all of them are translated, shows a message and tries again, until all of them
+  are translated.
+
+## 0.15.8
+
+### Patch Changes
+
+- 3d5d73a: Solve issues with paths on windows
+
+## 0.15.7
+
+### Patch Changes
+
+- 957574f: Fix sequence expressions not visited
+- 0223e40: Fix cli with --clean removing all messages not belonging to the last adapter out of those sharing a catalog
+
+## 0.15.6
+
+### Patch Changes
+
+- 485f5fe: Fix .svelte files with <script module> stuck translatios on SSR
+
+## 0.15.5
+
+### Patch Changes
+
+- f698c89: Fix init command ENOENT error when dir doesn't exist
+
+## 0.15.4
+
+### Patch Changes
+
+- 5ec75dc: Use component in components to preserve non string types
+
+  This is mainly relevant to the JSX adapter, where components themselves can be
+  passed around as values and props, and previously, if they are in expressions
+  like this:
+
+  ```jsx
+  const msg = <b>Hello</b>;
+  return <p>{msg} and welcome</p>;
+  ```
+
+  The `msg` would be converted into a string and it would become `[object Object]`.
+
+  Now this has been fixed.
+
+## 0.15.3
+
+### Patch Changes
+
+- 076dbbc: Fix broken HMR after splitting reactive vs plain
+
+## 0.15.2
+
+### Patch Changes
+
+- bc8a734: Add ssr default loader for vite
+
+## 0.15.1
+
+### Patch Changes
+
+- d03dfa1: Fix error when runtime initialized after non literal expressions
+- 2a74da7: Fix not all loaders updated for two exports
+
+## 0.15.0
+
+### Minor Changes
+
+- af21188: Optional support for separate loader for SSR
+- 26ce0c3: Separate reactive and plain loader functions
+
+  This is to fix errors happening specifically with React as it doesn't allow
+  using hooks inside non hooks or components. But it opens up finer
+  configurations for Svelte and SolidJS as well for which the defaults have been
+  adjusted as well.
+
+  You can now export different functions from the loader files for reactive (e.g.
+  using hooks) and non reactive (e.g. just simple object lookup) and tell
+  `wuchale` their names using configuration options, and also adjust which one is
+  used when.
+
+  If you want to update your loader(s), you can do `npx wuchale init` and select
+  another one than `existing`.
+
+## 0.14.6
+
+### Patch Changes
+
+- 53ee835: Surround object keys only if not computed
+- d67de40: Fix error when extracting quoted object key strings
+
 ## 0.14.5
 
 ### Patch Changes

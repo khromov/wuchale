@@ -1,11 +1,15 @@
 import { resolve } from "node:path"
 import { type Adapter } from "./adapters.js"
+import type { AI } from "./ai/index.js"
+import { defaultGemini } from "./ai/gemini.js"
+
+export type LogLevel = 'error' | 'warn' | 'info' | 'verbose'
 
 export type ConfigPartial = {
     sourceLocale?: string
     otherLocales?: string[]
-    geminiAPIKey?: string,
-    messages?: boolean,
+    ai?: AI
+    logLevel?: LogLevel
 }
 
 export type Config = ConfigPartial & {
@@ -18,8 +22,8 @@ export const defaultConfig: Config = {
     otherLocales: [],
     adapters: {},
     hmr: true,
-    geminiAPIKey: 'env',
-    messages: true,
+    ai: defaultGemini,
+    logLevel: 'info',
 }
 
 function deepAssign<Type>(fromObj: Type, toObj: Type) {
@@ -32,7 +36,7 @@ function deepAssign<Type>(fromObj: Type, toObj: Type) {
             continue
         }
         // objects
-        if (!toObj[key]) {
+        if (!toObj[key] || Array.isArray(toObj[key]) || typeof toObj[key] !== 'object') {
             toObj[key] = {}
         }
         deepAssign(fromObj[key], toObj[key])
@@ -44,14 +48,14 @@ export function defineConfig(config: Config) {
 }
 
 export function deepMergeObjects<Type>(source: Type, target: Type): Type {
-    const full = {...target}
+    const full = { ...target }
     deepAssign(source, full)
     return full
 }
 
-export const configName = 'wuchale.config.js'
+export const defaultConfigNames = ['js', 'mjs'].map(ext => `wuchale.config.${ext}`)
 
-const displayName = new Intl.DisplayNames(['en'], {type: 'language'})
+const displayName = new Intl.DisplayNames(['en'], { type: 'language' })
 export const getLanguageName = (code: string) => displayName.of(code)
 
 function checkValidLocale(locale: string) {
@@ -63,9 +67,24 @@ function checkValidLocale(locale: string) {
 }
 
 export async function getConfig(configPath?: string): Promise<Config> {
-    const importPath = (configPath && resolve(configPath)) ?? `${process.cwd()}/${configName}`
-    const module = await import(importPath)
-    const config = deepMergeObjects(<Config>module.default, defaultConfig)
+    let module: { default: Config }
+    for (const confName of [configPath, ...defaultConfigNames]) {
+        if (!confName) {
+            continue
+        }
+        try {
+            module = await import(`file://${resolve(confName)}`)
+            break
+        } catch (err) {
+            if (err.code !== 'ERR_MODULE_NOT_FOUND') {
+                throw err
+            }
+        }
+    }
+    if (module == null) {
+        throw new Error('Config file not found')
+    }
+    const config = deepMergeObjects(module.default, defaultConfig)
     checkValidLocale(config.sourceLocale)
     for (const loc of config.otherLocales) {
         checkValidLocale(loc)

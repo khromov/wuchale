@@ -1,27 +1,31 @@
-import MagicString from "magic-string"
-import { Parser, type Program } from "acorn"
+import MagicString from 'magic-string'
+import { Parser } from 'acorn'
 import { Message } from 'wuchale'
 import { tsPlugin } from '@sveltejs/acorn-typescript'
 import type * as JX from 'estree-jsx'
-import jsx from 'acorn-jsx'
-import { Transformer, scriptParseOptionsWithComments } from 'wuchale/adapter-vanilla'
+import type * as Estree from 'acorn'
+import { Transformer, scriptParseOptionsWithComments, parseScript } from 'wuchale/adapter-vanilla'
 import type {
     IndexTracker,
     HeuristicFunc,
     TransformOutput,
-    CommentDirectives,
+    RuntimeConf,
+    CatalogExpr,
+    CodePattern,
+    UrlMatcher,
 } from 'wuchale'
-import { nonWhitespaceText, MixedVisitor, runtimeVars } from "wuchale/adapter-utils"
+import { nonWhitespaceText, MixedVisitor, processCommentDirectives, type CommentDirectives } from "wuchale/adapter-utils"
+import type { AnyNode } from 'acorn'
 
-const JsxParser = Parser.extend(tsPlugin(), jsx())
+const JsxParser = Parser.extend(tsPlugin({jsx: true}))
 
-export function parseScript(content: string): [Program, JX.Comment[][]] {
+export function parseScriptJSX(content: string): [Estree.Program, Estree.Comment[][]] {
     const [opts, comments] = scriptParseOptionsWithComments()
     return [JsxParser.parse(content, opts), comments]
 }
 
 const nodesWithChildren = ['JSXElement']
-const rtComponent = 'WuchaleTrans'
+const rtComponent = 'W_tx_'
 
 type MixedNodesTypes = JX.JSXElement | JX.JSXFragment | JX.JSXText | JX.JSXExpressionContainer | JX.JSXSpreadChild
 
@@ -34,16 +38,17 @@ export class JSXTransformer extends Transformer {
     inCompoundText: boolean = false
     commentDirectivesStack: CommentDirectives[] = []
     lastVisitIsComment: boolean = false
-    currentElementI = 0
+    currentJsxKey?: number
 
     mixedVisitor: MixedVisitor<MixedNodesTypes>
 
-    constructor(content: string, filename: string, index: IndexTracker, heuristic: HeuristicFunc, pluralsFunc: string, initRuntime: string) {
-        super(content, filename, index, heuristic, pluralsFunc, initRuntime)
+    constructor(content: string, filename: string, index: IndexTracker, heuristic: HeuristicFunc, patterns: CodePattern[], catalogExpr: CatalogExpr, rtConf: RuntimeConf, matchUrl: UrlMatcher) {
+        super(content, filename, index, heuristic, patterns, catalogExpr, rtConf, matchUrl)
     }
 
     initMixedVisitor = () => new MixedVisitor<MixedNodesTypes>({
         mstr: this.mstr,
+        vars: this.vars,
         getRange: node => ({
             // @ts-expect-error
             start: node.start,
@@ -55,6 +60,7 @@ export class JSXTransformer extends Transformer {
             // @ts-expect-error
             && node.expression.end > node.expression.start,
         isText: node => node.type === 'JSXText',
+        leaveInPlace: () => false,
         isExpression: node => node.type === 'JSXExpressionContainer',
         getTextContent: (node: JX.JSXText) => node.value,
         getCommentData: (node: JX.JSXExpressionContainer) => this.getMarkupCommentBody(node.expression as JX.JSXEmptyExpression),
@@ -67,28 +73,33 @@ export class JSXTransformer extends Transformer {
             return childTxts
         },
         visitExpressionTag: this.visitJSXExpressionContainer,
-        checkHeuristic: this.checkHeuristicBool,
+        fullHeuristicDetails: this.fullHeuristicDetails,
+        checkHeuristic: this.getHeuristicMessageType,
         index: this.index,
         wrapNested: (msgInfo, hasExprs, nestedRanges, lastChildEnd) => {
-            for (const [i, [childStart, _, haveCtx]] of nestedRanges.entries()) {
-                let toAppend: string
-                if (i === 0) {
-                    toAppend = `<${rtComponent} tags={[`
-                } else {
-                    toAppend = ', '
+            let begin = `<${rtComponent}`
+            if (nestedRanges.length > 0) {
+                for (const [i, [childStart, _, haveCtx]] of nestedRanges.entries()) {
+                    let toAppend: string
+                    if (i === 0) {
+                        toAppend = `${begin} t={[`
+                    } else {
+                        toAppend = ', '
+                    }
+                    this.mstr.appendRight(childStart, `${toAppend}${haveCtx ? this.vars().nestCtx : '()'} => `)
                 }
-                this.mstr.appendRight(childStart, `${toAppend}${haveCtx ? runtimeVars.nestCtx : '()'} => `)
+                begin = `]}`
             }
-            let begin = `]} ctx=`
+            begin += ' x='
             if (this.inCompoundText) {
-                begin += `{${runtimeVars.nestCtx}} nest`
+                begin += `{${this.vars().nestCtx}} n`
             } else {
                 const index = this.index.get(msgInfo.toKey())
-                begin += `{${runtimeVars.rtCtx}(${index})}`
+                begin += `{${this.vars().rtCtx}(${index})}`
             }
             let end = ' />'
             if (hasExprs) {
-                begin += ' args={['
+                begin += ' a={['
                 end = ']}' + end
             }
             this.mstr.appendLeft(lastChildEnd, begin)
@@ -125,12 +136,16 @@ export class JSXTransformer extends Transformer {
         for (const attr of node.openingElement.attributes) {
             msgs.push(...this.visitJx(attr))
         }
-        if (this.inCompoundText) {
-            this.mstr.appendLeft(
-                // @ts-expect-error
-                node.openingElement.name.end,
-                ` key="_${this.currentElementI}"`
-            )
+        if (this.inCompoundText && this.currentJsxKey != null) {
+            const key = node.openingElement.attributes.find(attr => attr.type === 'JSXAttribute' && attr.name.name === 'key')
+            if (!key) {
+                this.mstr.appendLeft(
+                    // @ts-expect-error
+                    node.openingElement.name.end,
+                    ` key="_${this.currentJsxKey}"`
+                )
+                this.currentJsxKey++
+            }
         }
         this.currentElement = currentElement
         return msgs
@@ -150,7 +165,7 @@ export class JSXTransformer extends Transformer {
             node.start + startWh,
             // @ts-expect-error
             node.end - endWh,
-            `{${runtimeVars.rtTrans}(${this.index.get(msgInfo.toKey())})}`,
+            `{${this.vars().rtTrans}(${this.index.get(msgInfo.toKey())})}`,
         )
         return [msgInfo]
     }
@@ -167,28 +182,42 @@ export class JSXTransformer extends Transformer {
     }
 
     visitJSXExpressionContainer = (node: JX.JSXExpressionContainer): Message[] => {
-        return this.visit(node.expression as JX.Expression)
+        return this.visit(node.expression as Estree.Expression)
     }
 
     visitJSXAttribute = (node: JX.JSXAttribute): Message[] => {
-        if (node.value.type !== 'Literal') {
-            return this.visitJx(node.value)
-        }
-        if (typeof node.value.value !== 'string') {
+        if (node.value == null) {
             return []
         }
-        const value = node.value
         let name: string
         if (node.name.type === 'JSXIdentifier') {
             name = node.name.name
         } else {
             name = node.name.name.name
         }
-        const [pass, msgInfo] = this.checkHeuristic(node.value.value, {
-            scope: 'attribute',
+        const heurBase = {
+            scope: 'script' as 'script',
             element: this.currentElement,
             attribute: name,
-        })
+        }
+        if (node.value.type !== 'Literal') {
+            if (node.value.type === 'JSXExpressionContainer') {
+                if (node.value.expression.type === 'Literal' && typeof node.value.expression.value === 'string') {
+                    const expr = node.value.expression as Estree.Literal
+                    return this.visitWithCommentDirectives(expr, () => this.visitLiteral(expr, heurBase))
+                }
+                if (node.value.expression.type === 'TemplateLiteral') {
+                    const expr = node.value.expression as Estree.TemplateLiteral
+                    return this.visitWithCommentDirectives(expr, () => this.visitTemplateLiteral(expr, heurBase))
+                }
+            }
+            return this.visitJx(node.value)
+        }
+        if (typeof node.value.value !== 'string') {
+            return []
+        }
+        const value = node.value
+        const [pass, msgInfo] = this.checkHeuristic(node.value.value, heurBase)
         if (!pass) {
             return []
         }
@@ -197,64 +226,66 @@ export class JSXTransformer extends Transformer {
             value.start,
             // @ts-expect-error
             value.end,
-            `{${runtimeVars.rtTrans}(${this.index.get(msgInfo.toKey())})}`,
+            `{${this.vars().rtTrans}(${this.index.get(msgInfo.toKey())})}`,
         )
         return [msgInfo]
     }
 
-    visitJSXSpreadAttribute = (node: JX.JSXSpreadAttribute): Message[] => this.visit(node.argument)
+    visitJSXSpreadAttribute = (node: JX.JSXSpreadAttribute): Message[] => this.visit(node.argument as Estree.Expression)
 
     visitJSXEmptyExpression = (node: JX.JSXEmptyExpression): Message[] => {
         const commentContents = this.getMarkupCommentBody(node)
         if (!commentContents) {
             return []
         }
-        const directives = this.processCommentDirectives(commentContents)
+        this.commentDirectives = processCommentDirectives(commentContents, this.commentDirectives)
         if (this.lastVisitIsComment) {
-            this.commentDirectivesStack[this.commentDirectivesStack.length - 1] = directives
+            this.commentDirectivesStack[this.commentDirectivesStack.length - 1] = this.commentDirectives
         } else {
-            this.commentDirectivesStack.push(directives)
+            this.commentDirectivesStack.push(this.commentDirectives)
         }
         this.lastVisitIsComment = true
         return []
     }
 
-    visitJx = (node: JX.Node | JX.JSXSpreadChild | Program): Message[] => {
+    visitJx = (node: JX.Node | JX.JSXSpreadChild | Estree.Program): Message[] => {
         if (node.type === 'JSXText' && !node.value.trim()) {
             return []
         }
         if (node.type === 'JSXExpressionContainer' && node.expression.type === 'JSXEmptyExpression') { // markup comment
             return this.visitJSXEmptyExpression(node.expression)
         }
-        let msgs = []
+        let msgs: Message[] = []
         const commentDirectivesPrev = this.commentDirectives
         if (this.lastVisitIsComment) {
             this.commentDirectives = this.commentDirectivesStack.pop()
             this.lastVisitIsComment = false
         }
-        if (this.commentDirectives.forceInclude !== false) {
-            msgs = this.visit(node)
+        if (this.commentDirectives.ignoreFile) {
+            return []
+        }
+        if (this.commentDirectives.forceType !== false) {
+            msgs = this.visit(node as AnyNode)
         }
         this.commentDirectives = commentDirectivesPrev
         return msgs
     }
 
-    transformJx = (headerHead: string, lib: JSXLib): TransformOutput => {
-        const [ast, comments] = parseScript(this.content)
+    transformJx = (lib: JSXLib): TransformOutput => {
+        // jsx vs type casting is not ambiguous in all files except .ts files
+        const [ast, comments] = (this.filename.endsWith('.ts') ? parseScript : parseScriptJSX)(this.content)
         this.comments = comments
         this.mstr = new MagicString(this.content)
         this.mixedVisitor = this.initMixedVisitor()
-        const msgs = this.visitJx(ast)
-        if (!msgs.length) {
-            return this.finalize(msgs, 0)
+        if (lib === 'default') {
+            this.currentJsxKey = 0
         }
-        let devInit = ''
-        const headerFin = [
+        const msgs = this.visitJx(ast)
+        const header = [
             `import ${rtComponent} from "@wuchale/jsx/runtime${lib === 'solidjs' ? '.solid' : ''}.jsx"`,
-            headerHead,
-            devInit,
+            this.initRuntime(this.filename, null, null, {}),
         ].join('\n')
-        this.mstr.appendRight(0, headerFin + '\n')
-        return this.finalize(msgs, 0)
+        const bodyStart = this.getRealBodyStart(ast.body)
+        return this.finalize(msgs, bodyStart, header)
     }
 }

@@ -19,13 +19,26 @@ export {
     IndexTracker,
     defaultGenerateLoadID,
     defaultHeuristic,
+    defaultHeuristicOpts,
+    createHeuristic,
 } from './adapters.js'
 export type {
     Adapter,
     AdapterArgs,
     AdapterPassThruOpts,
+    CodePattern,
+    CreateHeuristicOpts,
+    LoaderChoice,
+    MessageType,
+    HeuristicResult,
+    RuntimeConf,
+    CatalogExpr,
+    HeuristicDetails,
+    HeuristicDetailsBase,
     HeuristicFunc,
     TransformOutput,
     TransformHeader,
-    CommentDirectives,
+    UseReactiveFunc,
+    UrlMatcher,
 } from './adapters.js'
+export { gemini } from './ai/gemini.js'

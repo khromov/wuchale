@@ -1,23 +1,26 @@
 // Shared logic between adapters for handling nested / mixed elements within elements / fragments
 
 import type MagicString from "magic-string"
-import { IndexTracker, Message, type CommentDirectives, type HeuristicDetailsBase, type HeuristicFunc } from "../adapters.js"
-import { nonWhitespaceText, runtimeVars } from "./index.js"
+import { IndexTracker, Message, type HeuristicDetails, type HeuristicDetailsBase, type HeuristicFunc, type MessageType } from "../adapters.js"
+import { commentPrefix, nonWhitespaceText, type RuntimeVars, type CommentDirectives } from "./index.js"
 
 type NestedRanges = [number, number, boolean][]
 
 type InitProps<NodeT> = {
+    vars: () => RuntimeVars
     mstr: MagicString
     getRange: (node: NodeT) => { start: number, end: number }
     isText: (node: NodeT) => boolean
     isExpression: (node: NodeT) => boolean
     isComment: (node: NodeT) => boolean
+    leaveInPlace: (node: NodeT) => boolean
     canHaveChildren: (node: NodeT) => boolean
     getTextContent: (node: NodeT) => string
     getCommentData: (node: NodeT) => string
     visitFunc: (node: NodeT, inCompoundText: boolean) => Message[]
     visitExpressionTag: (node: NodeT) => Message[]
-    checkHeuristic: HeuristicFunc<HeuristicDetailsBase>
+    fullHeuristicDetails: (details: HeuristicDetailsBase) => HeuristicDetails
+    checkHeuristic: HeuristicFunc
     wrapNested: (msgInfo: Message, hasExprs: boolean, nestedRanges: NestedRanges, lastChildEnd: number) => void
     index: IndexTracker
 }
@@ -31,6 +34,7 @@ type VisitProps<NodeT> = {
     scope: MixedScope
     element: string
     attribute?: string
+    useComponent?: boolean
 }
 
 export interface MixedVisitor<NodeT> extends InitProps<NodeT> {}
@@ -41,7 +45,7 @@ export class MixedVisitor<NodeT> {
         Object.assign(this, props)
     }
 
-    separatelyVisitChildren = (props: VisitProps<NodeT>): [boolean, boolean, boolean, Message[]] => {
+    separatelyVisitChildren = (props: VisitProps<NodeT>): [boolean, boolean, boolean, MessageType, Message[]] => {
         let hasTextChild = false
         let hasNonTextChild = false
         let heurStr = ''
@@ -53,26 +57,28 @@ export class MixedVisitor<NodeT> {
                     continue
                 }
                 hasTextChild = true
-                heurStr += strContent + ' '
+                heurStr += strContent
             } else if (this.isComment(child)) {
-                if (this.getCommentData(child).trim().startsWith('@wc-')) {
+                if (this.getCommentData(child).trim().startsWith(commentPrefix)) {
                     hasCommentDirectives = true
                 }
-            } else {
+            } else if (!this.leaveInPlace(child)) {
                 hasNonTextChild = true
-                heurStr += `# `
+                heurStr += `#`
             }
         }
         heurStr = heurStr.trimEnd()
-        const passHeuristic = this.checkHeuristic(heurStr, {
+        const msg = new Message(heurStr, this.fullHeuristicDetails({
             scope: props.scope,
             element: props.element,
             attribute: props.attribute,
-        })
-        let hasCompoundText = hasTextChild && hasNonTextChild
-        const visitAsOne = passHeuristic && !hasCommentDirectives
-        if (props.inCompoundText || hasCompoundText && visitAsOne) {
-            return [false, hasTextChild, hasCompoundText, []]
+        }), null)
+        const heurMsgType = this.checkHeuristic(msg)
+        if (heurMsgType) {
+            let hasCompoundText = hasTextChild && hasNonTextChild
+            if (props.inCompoundText || hasCompoundText && !hasCommentDirectives) {
+                return [false, hasTextChild, hasCompoundText, heurMsgType, []]
+            }
         }
         // can't be extracted as one; visit each separately if markup
         const msgs = []
@@ -81,14 +87,14 @@ export class MixedVisitor<NodeT> {
                 msgs.push(...this.visitFunc(child, props.inCompoundText))
             }
         }
-        return [true, false, false, msgs]
+        return [true, false, false, heurMsgType || 'message', msgs]
     }
 
     visit = (props: VisitProps<NodeT>): Message[] => {
         if (props.children.length === 0) {
             return []
         }
-        const [visitedSeparately, hasTextChild, hasCompoundText, separateTxts] = this.separatelyVisitChildren(props)
+        const [visitedSeparately, hasTextChild, hasCompoundText, heurMsgType, separateTxts] = this.separatelyVisitChildren(props)
         if (visitedSeparately) {
             return separateTxts
         }
@@ -99,6 +105,7 @@ export class MixedVisitor<NodeT> {
         const childrenNestedRanges: NestedRanges = []
         let hasTextDescendants = false
         const msgs = []
+        const comments: string[] = []
         for (const child of props.children) {
             if (this.isComment(child)) {
                 continue
@@ -106,7 +113,7 @@ export class MixedVisitor<NodeT> {
             const chRange = this.getRange(child)
             if (this.isText(child)) {
                 const [startWh, trimmed, endWh] = nonWhitespaceText(this.getTextContent(child))
-                const msgInfo = new Message(trimmed, props.scope, props.commentDirectives.context)
+                const msgInfo = new Message(trimmed, this.fullHeuristicDetails({scope: props.scope}), props.commentDirectives.context)
                 if (startWh && !msgStr.endsWith(' ')) {
                     msgStr += ' '
                 }
@@ -125,7 +132,9 @@ export class MixedVisitor<NodeT> {
                 if (!hasCompoundText) {
                     continue
                 }
-                msgStr += `{${iArg}}`
+                const placeholder = `{${iArg}}`
+                msgStr += placeholder
+                comments.push(`placeholder ${placeholder}: ${this.mstr.original.slice(chRange.start + 1, chRange.end - 1)}`)
                 let moveStart = chRange.start
                 if (iArg > 0) {
                     this.mstr.update(chRange.start, chRange.start + 1, ', ')
@@ -138,13 +147,17 @@ export class MixedVisitor<NodeT> {
                 iArg++
                 continue
             }
+            if (this.leaveInPlace(child)) {
+                msgs.push(...this.visitFunc(child, this.canHaveChildren(child)))
+                continue
+            }
             // elements, components and other things as well
             const canHaveChildren = this.canHaveChildren(child)
             const childMsgs = this.visitFunc(child, canHaveChildren)
             let nestedNeedsCtx = false
             let chTxt = ''
             for (const msgInfo of childMsgs) {
-                if (canHaveChildren && msgInfo.scope === props.scope) {
+                if (canHaveChildren && msgInfo.details.scope === props.scope) {
                     chTxt += msgInfo.msgStr[0]
                     hasTextDescendants = true
                     nestedNeedsCtx = true
@@ -166,22 +179,24 @@ export class MixedVisitor<NodeT> {
         if (!msgStr) {
             return msgs
         }
-        const msgInfo = new Message(msgStr, props.scope, props.commentDirectives.context)
+        const msgInfo = new Message(msgStr, this.fullHeuristicDetails({scope: props.scope}), props.commentDirectives.context)
+        msgInfo.type = heurMsgType
+        msgInfo.comments = comments
         if (hasTextChild || hasTextDescendants) {
             msgs.push(msgInfo)
         } else {
             return msgs
         }
-        if (childrenNestedRanges.length) {
+        if ((props.useComponent ?? true) && props.scope === 'markup' && iArg > 0 || childrenNestedRanges.length > 0) {
             this.wrapNested(msgInfo, iArg > 0, childrenNestedRanges, lastChildEnd)
-        } else if (hasTextChild) {
+        } else {
             // no need for component use
             let begin = '{'
             let end = ')}'
             if (props.inCompoundText) {
-                begin += `${runtimeVars.rtTransCtx}(${runtimeVars.nestCtx}`
+                begin += `${this.vars().rtTransCtx}(${this.vars().nestCtx}`
             } else {
-                begin += `${runtimeVars.rtTrans}(${this.index.get(msgInfo.toKey())}`
+                begin += `${this.vars().rtTrans}(${this.index.get(msgInfo.toKey())}`
             }
             if (iArg > 0) {
                 begin += ', ['

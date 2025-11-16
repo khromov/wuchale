@@ -6,13 +6,14 @@ import { fileURLToPath } from 'url'
 import { dirname, relative } from 'path'
 import PO from 'pofile'
 
-export const absDir = (/** @type {string} */ fileurl) => dirname(fileURLToPath(fileurl))
+export const absDir = (/** @type {string} */ fileurl) => relative(process.cwd(), dirname(fileURLToPath(fileurl))) || '.'
 const dirBase = absDir(import.meta.url)
-const testFile = relative(dirBase, `${dirBase}/test-tmp/test.js`)
+const testFile = `${dirBase}/test-dir/test.js`
 
-const adapterOpts = {
-    files: `${dirBase}/test-tmp/*`,
-    catalog: `${dirBase}/test-tmp/{locale}`,
+export const adapterOpts = {
+    files: `${dirBase}/test-dir/*`,
+    localesDir: `${dirBase}/test-tmp/`,
+    loader: 'vite',
     initInsideFunc: false,
 }
 
@@ -21,21 +22,21 @@ const adapterOpts = {
  * @param {import("wuchale").Adapter} adapter
  * @param {string} key
  * @param {string} filename
+ * @param {number} hmrVersion
  * @returns {Promise<object>}
  */
-export async function getOutput(adapter, key, content, filename) {
-    adapter.catalog
+export async function getOutput(adapter, key, content, filename, hmrVersion) {
     const handler = new AdapterHandler(
         adapter,
         key,
         defaultConfig,
-        'prod',
-        'virtual',
+        'dev',
         process.cwd(),
-        new Logger(false),
+        new Logger('error'),
     )
     await handler.init({})
-    const { code } = await handler.transform(content, filename)
+    await handler.initUrlPatterns()
+    const { code } = await handler.transform(content, filename, hmrVersion)
     const { poFilesByLoc, compiled } = handler.sharedState
     return { code, catalogs: poFilesByLoc, compiled }
 }
@@ -61,13 +62,14 @@ function trimLines(str) {
  * @param {string} content
  * @param {string} expectedContent
  * @param {string} expectedTranslations
- * @param {(string | number | (string | number)[])[]} expectedCompiled
+ * @param {(string | (string | number | (string | number)[])[])[]} expectedCompiled
  * @param {string} testFile
  * @param {import("wuchale").Adapter} adapter
  * @param {string} key
+ * @param {number} hmrVersion
  */
-export async function testContentSetup(t, adapter, key, content, expectedContent, expectedTranslations, expectedCompiled, testFile) {
-    const { code, catalogs, compiled } = await getOutput(adapter, key, content, testFile)
+export async function testContentSetup(t, adapter, key, content, expectedContent, expectedTranslations, expectedCompiled, testFile, hmrVersion=-1) {
+    const { code, catalogs, compiled } = await getOutput(adapter, key, content, testFile, hmrVersion)
     t.assert.strictEqual(trimLines(code), trimLines(expectedContent))
     const po = new PO()
     for (const key in catalogs.en.catalog) {
@@ -86,38 +88,39 @@ export async function testContentSetup(t, adapter, key, content, expectedContent
  * @param {string} testFileOut
  */
 export async function testDirSetup(t, adapter, key, dir, testFile, testFileOut) {
-    const content = (await readFile(`${dir}/${testFile}`)).toString()
+    const fnameIn = `${dir}/${testFile}`
+    const content = (await readFile(fnameIn)).toString()
     const contentOut = (await readFile(`${dir}/${testFileOut}`)).toString()
     const poContents = (await readFile(`${dir}/en.po`)).toString()
     const compiledContents = JSON.parse((await readFile(`${dir}/en.json`)).toString())
-    await testContentSetup(t, adapter, key, content, contentOut, poContents, compiledContents, testFile)
+    await testContentSetup(t, adapter, key, content, contentOut, poContents, compiledContents, fnameIn, -1)
 }
 
-const basic = adapter(adapterOpts)
+export const basic = adapter(adapterOpts)
 
 /**
  * @param {any} t
  * @param {string} content
  * @param {string} expectedContent
  * @param {string} expectedTranslations
- * @param {(string | number | (string | number)[])[]} expectedCompiled
+ * @param {(string | (string | number | (string | number)[])[])[]} expectedCompiled
  */
-export async function testContent(t, content, expectedContent, expectedTranslations, expectedCompiled) {
+export async function testContent(t, content, expectedContent, expectedTranslations, expectedCompiled, adapter=basic, hmrVersion=-1) {
     try {
-        await rm(adapterOpts.catalog.replace('{locale}', 'en.po'))
+        await rm(adapterOpts.localesDir, {recursive: true})
     } catch {}
-    await testContentSetup(t, basic, 'basic', content, expectedContent, expectedTranslations, expectedCompiled, testFile)
+    await testContentSetup(t, adapter, 'main', content, expectedContent, expectedTranslations, expectedCompiled, testFile, hmrVersion)
 }
 
 /**
  * @param {any} t
  * @param {string} dir
  */
-export async function testDir(t, dir) {
+export async function testDir(t, dir, adapter=basic) {
     try {
-        await rm(adapterOpts.catalog.replace('{locale}', 'en.po'))
+        await rm(adapterOpts.localesDir, {recursive: true})
     } catch {}
-    await testDirSetup(t, basic, 'basic',`${dirBase}/${dir}`, 'app.js', 'app.out.js')
+    await testDirSetup(t, adapter, 'basic',`${dirBase}/${dir}`, 'app.js', 'app.out.js')
 }
 
 // only for syntax highlighting
@@ -132,7 +135,7 @@ export const javascript = typescript
 //         },
 //     }
 // `
-// const p = await getOutput(basic, 'basic', code, testFile)
+// const p = await getOutput(basic, 'basic', code, testFile, -1)
 // console.log(p.code)
 // console.log(Object.values(p.catalogs.en))
 // console.log(p.compiled.en)

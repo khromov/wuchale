@@ -1,21 +1,28 @@
-import { readFile } from "node:fs/promises"
-export { MixedVisitor, type MixedScope } from './mixed-visitor.js'
+export { MixedVisitor } from './mixed-visitor.js'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import type { HeuristicResultChecked } from '../adapters.js'
 
-// for runtime
-const rtConst = '_w_runtime_'
-
-export const runtimeVars = {
+export const varNames = {
+    rt: '_w_runtime_',
     hmrUpdate: '_w_hmrUpdate_',
-    rtWrap: '_w_to_rt_',
-    rtConst,
-    rtTrans: `${rtConst}.t`,
-    rtTPlural: `${rtConst}.tp`,
-    rtPlural: `${rtConst}._.p`,
-    rtCtx: `${rtConst}.cx`,
-    rtTransCtx: `${rtConst}.tx`,
-    /** for when nesting, used in adapters with elements */
-    nestCtx: '_w_ctx_',
 }
+
+export function runtimeVars(wrapFunc: (expr: string) => string, base = varNames.rt) {
+    return {
+        rtTrans: `${wrapFunc(base)}.t`,
+        rtTPlural: `${wrapFunc(base)}.tp`,
+        rtPlural: `${wrapFunc(base)}._.p`,
+        rtLocale: `${wrapFunc(base)}.l`,
+        rtCtx: `${wrapFunc(base)}.cx`,
+        rtTransCtx: `${wrapFunc(base)}.tx`,
+        rtTransTag: `${wrapFunc(base)}.tt`,
+        /** for when nesting, used in adapters with elements */
+        nestCtx: '_w_ctx_',
+    }
+}
+
+export type RuntimeVars = ReturnType<typeof runtimeVars>
 
 export function nonWhitespaceText(msgStr: string): [number, string, number] {
     let trimmedS = msgStr.trimStart()
@@ -25,15 +32,43 @@ export function nonWhitespaceText(msgStr: string): [number, string, number] {
     return [startWh, trimmed, endWh]
 }
 
-export async function getDependencies() {
-    let json = { devDependencies: {}, dependencies: {} }
-    try {
-        const pkgJson = await readFile('package.json')
-        json = JSON.parse(pkgJson.toString())
-    } catch (err) {
-        if (err.code !== 'ENOENT') {
-            throw err
-        }
+export function loaderPathResolver(importMetaUrl: string, baseDir: string, ext: string) {
+    const dir = dirname(fileURLToPath(importMetaUrl))
+    return (name: string) => resolve(dir, `${baseDir}/${name}.${ext}`)
+}
+
+export const commentPrefix = '@wc-'
+
+const commentDirectives = {
+    ignore: `${commentPrefix}ignore`,
+    ignoreFile: `${commentPrefix}ignore-file`,
+    include: `${commentPrefix}include`,
+    url: `${commentPrefix}url`,
+    context: `${commentPrefix}context:`,
+}
+
+export type CommentDirectives = {
+    ignoreFile?: boolean
+    forceType?: HeuristicResultChecked
+    context?: string
+}
+
+export function processCommentDirectives(data: string, current: CommentDirectives) {
+    const directives: CommentDirectives = {...current}
+    if (data === commentDirectives.ignore) {
+        directives.forceType = false
     }
-    return new Set(Object.keys({ ...json.devDependencies, ...json.dependencies }))
+    if (data === commentDirectives.include) {
+        directives.forceType = 'message'
+    }
+    if (data === commentDirectives.url) {
+        directives.forceType = 'url'
+    }
+    if (data === commentDirectives.ignoreFile) {
+        directives.ignoreFile = true
+    }
+    if (data.startsWith(commentDirectives.context)) {
+        directives.context = data.slice(commentDirectives.context.length).trim()
+    }
+    return directives
 }
