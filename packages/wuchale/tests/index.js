@@ -9,7 +9,7 @@ import { loadCatalogs } from 'wuchale/load-utils/pure'
 import { compileTranslation } from '../dist/compile.js'
 import { testContent, basic, typescript, adapterOpts } from './check.js'
 import { statfs } from 'fs/promises'
-import './ordering-test.js'  // Import ordering tests
+import './ordering-test.js'
 import { URLMatcher } from 'wuchale/url'
 
 test('Compile nested', function(t) {

@@ -7,6 +7,7 @@ import { strictEqual } from 'node:assert'
 import { AdapterHandler } from '../dist/handler.js'
 import { getConfig } from '../dist/config.js'
 import { adapter as vanilla } from '../dist/adapter-vanilla/index.js'
+import { Logger } from '../dist/log.js'
 
 const createTempDir = async () => {
     const dir = join(tmpdir(), `wuchale-ordering-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
@@ -53,7 +54,7 @@ test('PO file ordering consistency across multiple extractions', async () => {
                 vanilla: {
                     ...vanilla({
                         files: join(tempDir, '**/*.js'),
-                        catalog: join(tempDir, '{locale}'),
+                        localesDir: tempDir,
                     })
                 }
             }
@@ -74,9 +75,8 @@ test('PO file ordering consistency across multiple extractions', async () => {
                 'vanilla',
                 config,
                 'extract',
-                'test',
                 tempDir,
-                { log: () => {}, info: () => {}, warn: () => {} }
+                new Logger('error')
             )
             
             await handler.init({})
@@ -195,7 +195,7 @@ test('Messages with different alphabetical order are sorted correctly', async ()
                 vanilla: {
                     ...vanilla({
                         files: join(tempDir, '**/*.js'),
-                        catalog: join(tempDir, '{locale}'),
+                        localesDir: tempDir,
                     })
                 }
             }
@@ -203,12 +203,11 @@ test('Messages with different alphabetical order are sorted correctly', async ()
         
         const handler = new AdapterHandler(
             config.adapters.vanilla,
-            'vanilla', 
+            'vanilla',
             config,
             'extract',
-            'test',
             tempDir,
-            { log: () => {}, info: () => {}, warn: () => {} }
+            new Logger('error')
         )
         
         await handler.init({})
